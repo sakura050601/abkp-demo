@@ -6,8 +6,9 @@
 
 - GitHub リポジトリは ABIST 関係者向けの Private として管理します。リポジトリの公開設定は、ソースコードを閲覧できる人を制限するものであり、デプロイした Web サイトのアクセス制限とは別です。
 - Vercel/Render に公開 URL を設定しても、Supabase モードではログインと `memberships` の登録が必要です。API は認証済みユーザーの所属プロジェクトを確認してからデータを返します。未認証ユーザーにもログイン画面や静的ファイルは表示されます。
-- ABIST の Google Workspace、SSO、GitHub チームなどとの自動連携はありません。Supabase Auth のユーザー作成と `memberships` への登録が必要です。メンバーの追加・削除は Supabase の管理者が行います。
-- `DEMO_MODE=true` は公開デモ用です。共有パスワードとサンプルアカウントを使用し、プロジェクトメンバー認証を行わないため、機密情報や実データを入力しないでください。本番・ABIST 内部向けデプロイでは必ず `DEMO_MODE=false` にします。
+- ABIST の Google Workspace、SSO、GitHub チームなどとの自動連携はありません。Supabase の `app_users` と `memberships` でアカウントと権限を管理します。登録したユーザーはデフォルトのワークスペースに `designer` として参加します。
+- `DEMO_MODE=true` はローカル JSON と組み込みデモアカウントを使います。Supabase に接続する場合は `DEMO_MODE=false` にしてください。
+- Supabase モードの簡易登録はメール認証なしで、誰でも登録できます。テスト専用です。本番公開前に招待制、メール確認、パスワード再設定、永続セッションを追加してください。
 - `CLIENT_ORIGIN` はブラウザーからのクロスオリジン通信を制御しますが、ユーザー認証やアクセス許可の代わりにはなりません。
 - Supabase の `service_role` キーは Render のサーバー環境変数だけに設定します。GitHub、Vercel、ブラウザー、README に登録しないでください。`.env` とローカルデータは Git の対象外です。
 - Vercel、Render、Supabase のプロジェクトは、継続運用できる ABIST 管理アカウント/チームに所有させ、複数の管理者と MFA を設定してください。ユーザー名を `sakura050601` に統一する必要はありませんが、今回は各サービスを `sakura050601` の管理下に作成する方針です。
@@ -58,29 +59,27 @@ API: http://127.0.0.1:3001
 
 ## Supabase の準備
 
-1. ABIST 管理下の Supabase 組織にプロジェクトを作成します。
-2. SQL Editor で `supabase/schema.sql` を一度だけ実行します。
-3. Authentication → Users でメンバーのユーザーを作成します。少なくとも1名の `senior` が必要です。
-4. SQL のプロジェクト UUID と Auth ユーザー UUID を実値に置き換え、プロジェクト、状態、メンバーを登録します。例は `supabase/schema.sql` の末尾を参照してください。
-5. 次のサーバー環境変数を Render に設定します。
+1. Supabase SQL Editor で `supabase/schema.sql` を実行します。旧 schema から `app_users` へ移行し、`memberships.user_id` は Supabase Auth ではなく自前のユーザー表を参照します。再実行可能です。
+2. ローカル `.env` に `SUPABASE_URL` とサーバー専用の `SUPABASE_SERVICE_ROLE_KEY` を設定し、`DEMO_MODE=false` にします。
+3. `npm run seed:demo` を一度実行します。workspace、UUID 自動生成の demo アカウント、初期カードを作成します。既存のデモユーザーのパスワードや既存のカードデータは上書きしません。
+4. Render に同じ Supabase URL/service-role key を設定し、`DEMO_MODE=false` にしてデプロイします。
 
 ```dotenv
 DEMO_MODE=false
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVER_ONLY_SERVICE_ROLE_KEY
 CLIENT_ORIGIN=https://YOUR_FRONTEND.vercel.app
 ```
 
-Supabase Auth のユーザー確認とメンバーシップの両方が必要です。RLS は有効ですが、サーバーの `service_role` は RLS を迂回するため、Render 以外には登録しないでください。
+デモログインは `author@example.test`、`reviewer@example.test`、`senior@example.test`、`viewer@example.test`、初期パスワードはすべて `knowledge-demo` です。公開環境で seed を実行すると既知のテストアカウントが作られるため、テスト後は削除またはパスワード変更してください。RLS は有効ですが、サーバーの `service_role` は RLS を迂回するため、Render 以外には登録しないでください。
 
-## Render への API デプロイ
+## Render へのデプロイ
 
 1. Render に `sakura050601` が管理するアカウント/チームでログインし、Private GitHub リポジトリへのアクセスを許可します。
 2. New Web Service から `sakura050601/abkp-demo` を選択します。Blueprint を使う場合は `render.yaml` を使用します。
-3. Build command は `npm ci`、Start command は `npm start`、Health check path は `/api/health` です。Node.js 22 を使用します。
-4. 上記の Supabase 環境変数と、Vercel の本番 origin を `CLIENT_ORIGIN` に設定します。`DEMO_MODE=false` を確認してください。
-5. デプロイ後、`https://YOUR_API.onrender.com/api/health` が `mode: supabase` を返すことを確認し、実ユーザーでログインとデータ保存をテストします。
+3. Blueprint の build command は依存関係を入れて Vite をビルドし、Start command は `npm start`、Health check は `/api/health` です。Node.js 22 を使用します。
+4. Supabase の `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` と `DEMO_MODE=false` を Render に設定します。`CLIENT_ORIGIN` には利用するフロントエンド origin を設定します。
+5. Render は `/` でフロントエンド、`/api/*` で API を提供します。`/api/health` が `mode: supabase` を返すことを確認します。
 
 本番データを Render のローカル JSON ファイルに保存しないでください。インスタンスのファイルは永続ストレージではありません。
 
@@ -89,10 +88,9 @@ Supabase Auth のユーザー確認とメンバーシップの両方が必要で
 1. Vercel に `sakura050601` が管理するアカウント/チームでログインし、同じ Private GitHub リポジトリへのアクセスを許可します。
 2. リポジトリを Import します。Framework は Vite、Build command は `npm run build`、Output Directory は `dist` です。`vercel.json` を含みます。
 3. `VITE_API_URL=https://YOUR_API.onrender.com` を環境変数に設定します。末尾に `/` は付けません。変更後は再デプロイします。
-4. Vercel の本番 URL を Render の `CLIENT_ORIGIN` と Supabase Auth の Site URL に設定します。
-5. `SUPABASE_SERVICE_ROLE_KEY` は Vercel に設定しません。フロントエンドが使用する anon key は公開用キーで、認可はサーバーと RLS で行います。
+4. `SUPABASE_SERVICE_ROLE_KEY` は Vercel に設定しません。アカウント登録と認証は Render API が処理します。
 
-フロントエンドと API は別オリジンで通信します。Vite の `/api` プロキシはローカル開発用です。公開 URL 自体をネットワークレベルで ABIST 限定にする場合は、Vercel/Render 側のアクセス制御も別途設定してください。
+Vercel は任意の独立 frontend として使えます。Render 上の frontend/API は同一 origin です。Vercel を使う場合は `VITE_API_URL=https://YOUR_API.onrender.com` を設定します。
 
 ## 検証
 
@@ -101,7 +99,7 @@ npm test
 npm run build
 ```
 
-8件のテストで、認証、権限、承認経路、同時更新、差し戻し、拒否、ログアウトなどを検証します。Supabase の実プロジェクトとの接続テストは、環境変数設定後に実施してください。
+10件のテストで、独自アカウント登録、パスワードハッシュ、ログイン、権限、承認経路、同時更新、差し戻し、拒否、ログアウトなどを検証します。Supabase の実プロジェクトへの migration/seed は手順に沿って実行してください。
 
 ## 主なファイル
 

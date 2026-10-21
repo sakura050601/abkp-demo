@@ -3,7 +3,7 @@ services:
     name: design-knowledge-api
     runtime: node
     plan: free
-    buildCommand: npm ci
+    buildCommand: npm ci && VITE_API_URL= npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
@@ -14,8 +14,6 @@ services:
       - key: CLIENT_ORIGIN
         sync: false
       - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_ANON_KEY
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
