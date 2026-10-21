@@ -1,0 +1,28 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {sampleText} from '../shared/domain.js';
+test('HTTP: auth, permissions, CAS, full approval and logout',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'knowledge-test-'));
+ const child=spawn(process.execPath,['server/index.js'],{env:{...process.env,PORT:'3119',DEMO_MODE:'true',DATA_DIR:dir,DEMO_PASSWORD:'test-password'},stdio:['ignore','pipe','pipe']});
+ t.after(async()=>{child.kill();await new Promise(r=>child.once('exit',r));await rm(dir,{recursive:true,force:true});});
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('server timeout')),10000);child.stdout.on('data',d=>{if(d.toString().includes('API ready')){clearTimeout(timer);resolve();}});child.once('exit',()=>reject(new Error('startup failed')));});
+ const req=async(path,token,body)=>{const r=await fetch('http://127.0.0.1:3119/api'+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json()};};
+ assert.equal((await req('/state')).status,401);
+ assert.equal((await req('/login',null,{userId:'author',password:'wrong'})).status,401);
+ const tokens={};for(const userId of ['author','reviewer','senior','viewer'])tokens[userId]=(await req('/login',null,{userId,password:'test-password'})).data.token;
+ let state=(await req('/state',tokens.author)).data;assert.equal(state.payload.cards[0].id,(await req('/state',tokens.author)).data.payload.cards[0].id);
+ assert.equal((await req('/commands',tokens.viewer,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}})).status,403);
+ const created=await req('/commands',tokens.author,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}});assert.equal(created.status,200);
+ assert.equal((await req('/commands',tokens.author,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}})).status,409);
+ const id=created.data.id;
+ const command=async(actor,command,payload)=>{state=(await req('/state',tokens[actor])).data;return req('/commands',tokens[actor],{command,revision:state.revision,payload:{id,version:1,...payload}});};
+ assert.equal((await command('author','submit',{problem:'変更の影響範囲',route:[{type:'review',label:'内容',assignees:['author']},{type:'review',label:'カード',assignees:['author']},{type:'final',label:'最終',assignees:['reviewer','senior']}]})).status,200);
+ assert.equal((await command('reviewer','decide',{decision:'approve'})).status,403);
+ for(const actor of ['author','author','reviewer','senior'])assert.equal((await command(actor,'decide',{decision:'approve',importance:'重要',priority:'P1',category:'主知識'})).status,200);
+ state=(await req('/state',tokens.author)).data;assert.equal(state.payload.cores.length,1);assert.equal(state.payload.cores[0].approvedVersion,1);
+ await req('/logout',tokens.author,{});assert.equal((await req('/state',tokens.author)).status,401);
+});
