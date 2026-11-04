@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authConfig, companyEmail, digest } from '../server/auth.js';
+import { authConfig, authDatabaseError, companyEmail, digest } from '../server/auth.js';
+
+test('database startup diagnostics distinguish missing tables from access failures without leaking provider details', () => {
+    assert.match(authDatabaseError({ code: 'PGRST205' }, 404).message, /auth_sessions is missing/);
+    assert.match(authDatabaseError({ code: '42501' }, 403).message, /Never use an anon/);
+    assert.match(authDatabaseError({}, 401).message, /server-only Supabase key/);
+    const message = authDatabaseError({ code: 'secret-containing-invalid-code', message: 'sensitive-key', details: 'sensitive-key', hint: 'sensitive-key' }, 0).message;
+    assert.doesNotMatch(message, /sensitive-key|secret-containing/);
+    assert.match(message, /HTTP unknown; code unknown/);
+});
 
 test('company invitations accept only the exact abist.co.jp domain and normalize email', () => {
     assert.equal(companyEmail.parse('1000001@abist.co.jp'), '1000001@abist.co.jp');

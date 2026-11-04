@@ -6,6 +6,14 @@ import { createMailer } from './email.js';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export const companyEmail = z.string().trim().email().max(254).transform(email => email.toLowerCase()).refine(email => email.endsWith('@abist.co.jp'), { message: 'Only @abist.co.jp company email addresses are allowed.' });
+export function authDatabaseError(error, status) {
+    const code = typeof error.code === 'string' && /^[A-Z0-9_]{1,24}$/.test(error.code) ? error.code : 'unknown';
+    const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 'unknown';
+    const hint = ['PGRST205', '42P01'].includes(code) ? 'public.auth_sessions is missing from this project or its API schema cache; apply the full supabase/schema.sql to the project configured in Render.'
+        : code === '42501' || [401, 403].includes(httpStatus) ? 'Check the server-only Supabase key, project URL and service_role table grants. Never use an anon or publishable key.'
+            : 'Check Supabase project availability, API configuration and server credentials.';
+    return new Error(`Authentication database unavailable [HTTP ${httpStatus}; code ${code}]. ${hint}`);
+}
 const secret = () => randomBytes(32).toString('base64url');
 const failure = (status = 400, message = '認証を完了できません。最初からやり直してください。') => Object.assign(new Error(message), { status });
 const same = (left, right) => typeof left === 'string' && typeof right === 'string' && Buffer.byteLength(left) === Buffer.byteLength(right) && timingSafeEqual(Buffer.from(left), Buffer.from(right));

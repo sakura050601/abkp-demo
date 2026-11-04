@@ -8,7 +8,7 @@ import { resolve, join } from 'node:path';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
 import { apply, demoUsers, seed, emptyState } from '../shared/domain.js';
-import { installAuth } from './auth.js';
+import { authDatabaseError, installAuth } from './auth.js';
 const demo = process.env.DEMO_MODE === 'true';
 const url = process.env.SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!demo && (!url || !key)) throw new Error('Configure Supabase or explicitly set DEMO_MODE=true in .env');
@@ -95,8 +95,8 @@ app.post('/api/commands', async (req, res, next) => {
     } catch (e) { next(e); }
 });
 if (!demo) {
-    const { error } = await db.from('auth_sessions').select('token_hash').limit(1);
-    if (error) throw new Error('Authentication database unavailable. Apply supabase/schema.sql and check server credentials.');
+    const { error, status } = await db.from('auth_sessions').select('token_hash').limit(1);
+    if (error) throw authDatabaseError(error, status);
 }
 const clientDir = resolve('dist');
 app.use(express.static(clientDir));
