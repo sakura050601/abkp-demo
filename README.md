@@ -85,7 +85,7 @@ EMAIL_CODE_SECRET=YOUR_RANDOM_SECRET_AT_LEAST_32_CHARACTERS
 
 1. Render に `sakura050601` が管理するアカウント/チームでログインし、Private GitHub リポジトリへのアクセスを許可します。
 2. New Web Service から `sakura050601/abkp-demo` を選択します。Blueprint を使う場合は `render.yaml` を使用します。
-3. Blueprint の build command は依存関係を入れて Vite をビルドし、Start command は `npm start`、Health check は `/api/health` です。Node.js 22 を使用します。
+3. Build Command は `npm ci --include=dev && VITE_API_URL= npm run build`、Start Command は `npm start`、Health Check は `/api/health` です。`NODE_ENV=production` でもビルド時には Vite の開発依存が必要です。既存サービスの Settings も手動で更新してください。Node.js 22 を使用します。
 4. Supabase の `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`DEMO_MODE=false`、`NODE_ENV=production` を設定します。`AUTH_ORIGIN` は Render の固定 HTTPS URL（末尾 `/` なし）です。`VITE_API_URL` は空にします。`WEBAUTHN_RP_ID` は省略時に origin の hostname を使用します。旧環境変数が残っている場合は削除するか同じ hostname にしてください。
 5. Render は `/` でフロントエンド、`/api/*` で API を提供します。`/api/health` が `mode: supabase` を返すことを確認します。
 

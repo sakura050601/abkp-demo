@@ -78,7 +78,7 @@ EMAIL_CODE_SECRET=YOUR_RANDOM_SECRET_AT_LEAST_32_CHARACTERS
 `AUTH_ORIGIN` 必须与浏览器访问地址完全一致，不含路径和末尾 `/`。`WEBAUTHN_RP_ID` 可省略，默认为该 hostname；如果设置，只填 hostname，不能填协议或端口。应用拒绝任意不同的 RP ID。生产环境必须 HTTPS；仅开发环境 localhost/127.0.0.1 允许 HTTP。
 
 4. 在配置了真实 Supabase 的本机执行 `npm run auth:init` 创建空工作区；已有资料不会被覆盖，也不会创建已知测试账号。不要在正式库运行 `seed:demo`。本地模拟预览的数据不会自动迁移到真实 Supabase。
-5. 在 Render 选择 Free Web Service，使用仓库的 [render.yaml](../render.yaml)。构建 `npm ci && VITE_API_URL= npm run build`，启动 `npm start`，健康检查 `/api/health`。环境变量同上，`NODE_ENV=production`，`DEMO_MODE=false`。
+5. 在 Render 选择 Free Web Service，使用仓库的 [render.yaml](../render.yaml)。Build Command 设置为 `npm ci --include=dev && VITE_API_URL= npm run build`，Start Command 为 `npm start`，健康检查 `/api/health`。构建阶段必须显式安装包含 Vite 的开发依赖，否则 `NODE_ENV=production` 下会报 `vite: not found`；运行时仍保持 `NODE_ENV=production` 和 `DEMO_MODE=false`。已有普通 Web Service 需在 Settings 中手工同步 Build Command，仓库 YAML 不会自动覆盖其配置。
 6. 使用 Render URL 同时访问网页和 API，不再采用旧的 Vercel → Render 跨域直连。Render Free 没有 Shell/一次性任务，管理员命令在本机运行即可。
 
 7. 所有代码、依赖锁文件、SQL 和模板需先提交并推送到 Render 实际关联的 GitHub 分支。已有服务先检查自动部署设置，避免未完成数据库迁移就触发部署。`npm test`、`npm run test:browser` 通过后，再明确选择最新提交进行部署。不会自动帮你提交、推送或执行真实数据库迁移。
