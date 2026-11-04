@@ -8,19 +8,18 @@ import { resolve, join } from 'node:path';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
 import { apply, demoUsers, seed, emptyState } from '../shared/domain.js';
-import { hashPassword, verifyPassword } from './passwords.js';
+import { installAuth } from './auth.js';
 const demo = process.env.DEMO_MODE === 'true';
 const url = process.env.SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!demo && (!url || !key)) throw new Error('Configure Supabase or explicitly set DEMO_MODE=true in .env');
 const db = demo ? null : createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 const app = express(), sessions = new Map();
 app.set('trust proxy', 1);
-app.use(helmet()); app.use(cors({ origin: (process.env.CLIENT_ORIGIN || 'http://127.0.0.1:5173').split(',').map(s => s.trim()) }));
-app.use(express.json({ limit: '8mb' })); app.use('/api', rateLimit({ windowMs: 60000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false }));
+app.use(helmet({ referrerPolicy: { policy: 'no-referrer' } })); app.use(cors({ origin: demo ? (process.env.CLIENT_ORIGIN || 'http://127.0.0.1:5173').split(',').map(s => s.trim()) : process.env.AUTH_ORIGIN, credentials: true }));
+app.use('/api/auth', express.json({ limit: '32kb' })); app.use(express.json({ limit: '8mb' })); app.use('/api', rateLimit({ windowMs: 60000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false }));
 app.get('/api/health', (_, res) => res.json({ ok: true, mode: demo ? 'demo' : 'supabase' }));
-app.get('/api/config', (_, res) => res.json({ demo, authMode: demo ? 'demo' : 'app-users' }));
-const loginInput = z.object({ email: z.string().trim().email().max(254), password: z.string().min(1).max(128) });
-const registerInput = z.object({ nickname: z.string().trim().min(1).max(60), email: z.string().trim().email().max(254), password: z.string().min(10).max(128) });
+app.get('/api/config', (_, res) => res.json({ demo, authMode: demo ? 'demo' : 'passkey' }));
+if (!demo) installAuth(app, db);
 function createSession(session) {
     const token = randomBytes(32).toString('hex');
     sessions.set(token, { ...session, expires: Date.now() + 8 * 3600000 });
@@ -33,43 +32,20 @@ app.post('/api/login', rateLimit({ windowMs: 60000, limit: 15 }), async (req, re
             if (!user || req.body.password !== (process.env.DEMO_PASSWORD || 'knowledge-demo')) return res.status(401).json({ error: 'ログイン情報が違います。' });
             return res.json({ token: createSession({ user, project: 'demo' }) });
         }
-        const input = loginInput.parse(req.body);
-        const email = input.email.toLowerCase();
-        const { data: user, error } = await db.from('app_users').select('id,nickname,password_hash').eq('email', email).maybeSingle();
-        if (error) throw error;
-        if (!user?.password_hash || !await verifyPassword(input.password, user.password_hash)) return res.status(401).json({ error: 'メールアドレスまたはパスワードが違います。' });
-        const { data: member, error: membershipError } = await db.from('memberships').select('project_id').eq('user_id', user.id).order('created_at').limit(1).maybeSingle();
-        if (membershipError) throw membershipError;
-        if (!member) return res.status(403).json({ error: 'プロジェクトへの登録がありません。管理者に確認してください。' });
-        res.json({ token: createSession({ userId: user.id, projectId: member.project_id }) });
+        res.sendStatus(410);
     } catch (error) { next(error); }
 });
 app.post('/api/register', rateLimit({ windowMs: 60000, limit: 10 }), async (req, res, next) => {
-    try {
-        if (demo) return res.status(404).json({ error: '演示モードでは新規登録できません。' });
-        const input = registerInput.parse(req.body);
-        const { data: project, error: projectError } = await db.from('projects').select('id').eq('is_default', true).maybeSingle();
-        if (projectError) throw projectError;
-        if (!project) return res.status(503).json({ error: 'ワークスペースが未初期化です。管理者に連絡してください。' });
-        const { data: user, error: userError } = await db.from('app_users').insert({ nickname: input.nickname, email: input.email.toLowerCase(), password_hash: await hashPassword(input.password) }).select('id').single();
-        if (userError?.code === '23505') return res.status(409).json({ error: 'このメールアドレスは登録済みです。' });
-        if (userError) throw userError;
-        const { error: membershipError } = await db.from('memberships').insert({ project_id: project.id, user_id: user.id, display_name: input.nickname, role: 'designer' });
-        if (membershipError) {
-            await db.from('app_users').delete().eq('id', user.id);
-            throw membershipError;
-        }
-        res.status(201).json({ token: createSession({ userId: user.id, projectId: project.id }) });
-    } catch (error) { next(error); }
+    res.status(404).json({ error: '演示モードでは新規登録できません。' });
 });
 app.use('/api', async (req, res, next) => {
     try {
         const token = (req.headers.authorization || '').replace(/^Bearer /, '');
-        const session = sessions.get(token);
-        if (!session || session.expires < Date.now()) { sessions.delete(token); return res.status(401).json({ error: 'ログインしてください。' }); }
+        const session = demo ? sessions.get(token) : req.authSession;
+        if (!session || (demo ? session.expires < Date.now() : !session.user_id)) { if (demo) sessions.delete(token); return res.status(401).json({ error: 'ログインしてください。' }); }
         if (demo) { req.actor = session.user; req.project = 'demo'; req.users = demoUsers; }
         else {
-            const { data: member, error: e } = await db.from('memberships').select('project_id,user_id,display_name,role').eq('user_id', session.userId).eq('project_id', session.projectId).maybeSingle(); if (e) throw e;
+            const { data: member, error: e } = await db.from('memberships').select('project_id,user_id,display_name,role').eq('user_id', session.user_id).eq('project_id', session.project_id).maybeSingle(); if (e) throw e;
             if (!member) return res.status(403).json({ error: 'プロジェクトへの登録がありません。管理者に確認してください。' });
             req.project = member.project_id; req.actor = { id: member.user_id, name: member.display_name, role: member.role };
             const { data: team, error: te } = await db.from('memberships').select('user_id,display_name,role').eq('project_id', req.project); if (te) throw te; req.users = team.map(u => ({ id: u.user_id, name: u.display_name, role: u.role }));
@@ -89,9 +65,39 @@ async function save(project, record) {
 }
 app.post('/api/logout', (req, res) => { sessions.delete((req.headers.authorization || '').replace('Bearer ', '')); res.json({ ok: true }); });
 app.get('/api/state', async (req, res, next) => { try { const record = await read(req.project); res.json({ ...record, user: req.actor, users: req.users, mode: demo ? 'demo' : 'supabase' }); } catch (e) { next(e); } });
+app.post('/api/profile/role', async (req, res, next) => {
+    try {
+        if (demo) return res.status(404).json({ error: 'パスキー接続時のみ変更できます。' });
+        const { role } = z.object({ role: z.enum(['designer', 'it']) }).strict().parse(req.body);
+        const work = queue.then(async () => {
+            const { error } = await db.rpc('auth_change_role', { p_session_hash: req.authSession.token_hash, p_role: role });
+            if (error) throw Object.assign(new Error('本人確認をやり直してから役割を変更してください。'), { status: 403 });
+        });
+        queue = work.catch(() => { }); await work;
+        res.json({ ok: true });
+    } catch (error) { next(error); }
+});
 const file = z.object({ name: z.string().max(180), type: z.string().max(120), size: z.number().max(2 * 1024 * 1024), data: z.string().max(2800000).regex(/^data:[^;]*;base64,[A-Za-z0-9+/=]*$/) });
 const schema = z.object({ command: z.enum(['create', 'submit', 'revise', 'decide', 'candidate']), revision: z.number().int().nonnegative(), payload: z.object({ id: z.string().max(80).optional(), version: z.number().int().optional(), text: z.string().max(50000).optional(), files: z.array(file).max(2).optional(), consent: z.boolean().optional(), problem: z.string().max(500).optional(), route: z.array(z.object({ type: z.enum(['review', 'final']), label: z.string().max(80), assignees: z.array(z.string().max(80)).max(2) })).max(8).optional(), decision: z.enum(['approve', 'return', 'reject']).optional(), reason: z.string().max(2000).optional(), importance: z.string().max(10).optional(), priority: z.string().max(5).optional(), category: z.string().max(10).optional() }) });
-app.post('/api/commands', async (req, res, next) => { try { const input = schema.parse(req.body); const work = queue.then(async () => { const record = await read(req.project); if (record.revision !== input.revision) throw Object.assign(new Error('更新があります。再読み込みして操作し直してください。'), { status: 409 }); const id = apply(record.payload, req.actor, req.users, input.command, input.payload); record.revision++; await save(req.project, record); return { id }; }); queue = work.catch(() => { }); res.json(await work); } catch (e) { next(e); } });
+app.post('/api/commands', async (req, res, next) => {
+    try {
+        const input = schema.parse(req.body); const work = queue.then(async () => {
+            if (!demo) {
+                const { data: team, error } = await db.from('memberships').select('user_id,display_name,role').eq('project_id', req.project);
+                if (error) throw error;
+                req.users = team.map(member => ({ id: member.user_id, name: member.display_name, role: member.role }));
+                const actor = req.users.find(member => member.id === req.actor.id);
+                if (!actor) throw Object.assign(new Error('プロジェクトへのアクセス権がありません。'), { status: 403 });
+                req.actor = actor;
+            }
+            const record = await read(req.project); if (record.revision !== input.revision) throw Object.assign(new Error('更新があります。再読み込みして操作し直してください。'), { status: 409 }); const id = apply(record.payload, req.actor, req.users, input.command, input.payload); record.revision++; await save(req.project, record); return { id };
+        }); queue = work.catch(() => { }); res.json(await work);
+    } catch (e) { next(e); }
+});
+if (!demo) {
+    const { error } = await db.from('auth_sessions').select('token_hash').limit(1);
+    if (error) throw new Error('Authentication database unavailable. Apply supabase/schema.sql and check server credentials.');
+}
 const clientDir = resolve('dist');
 app.use(express.static(clientDir));
 app.get(/^(?!\/api(?:\/|$)).*/, (_, res) => res.sendFile(join(clientDir, 'index.html')));

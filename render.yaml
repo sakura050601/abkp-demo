@@ -11,9 +11,17 @@ services:
         value: 22.16.0
       - key: DEMO_MODE
         value: "false"
-      - key: CLIENT_ORIGIN
+      - key: NODE_ENV
+        value: production
+      - key: AUTH_ORIGIN
         sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: SMTP2GO_API_KEY
+        sync: false
+      - key: EMAIL_CODE_SECRET
+        generateValue: true

@@ -1,137 +1,189 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
-import { once } from 'node:events';
+import { authFixture, authenticator, enroll, login } from './auth-support.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
-const projectId = randomUUID();
-const tables = {
-    app_users: [],
-    projects: [{ id: projectId, name: 'Test workspace', is_default: true }],
-    memberships: [],
-    project_states: [{ project_id: projectId, revision: 0, payload: { raw: [], cards: [], cores: [], events: [] } }]
-};
-
-const fakeSupabase = createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const table = url.pathname.split('/').at(-1);
-    if (!tables[table]) return respond(res, 404, { message: 'table not found' });
-    const select = url.searchParams.get('select');
-    if (req.method === 'GET') {
-        let rows = tables[table].filter(row => [...url.searchParams].every(([key, value]) => {
-            if (key === 'select' || key === 'order' || key === 'limit') return true;
-            const separator = value.indexOf('.');
-            const operator = value.slice(0, separator);
-            const expected = value.slice(separator + 1);
-            return operator !== 'eq' || String(row[key]) === expected;
-        }));
-        const limit = Number(url.searchParams.get('limit'));
-        if (limit) rows = rows.slice(0, limit);
-        return respond(res, 200, project(rows, select), req.headers.accept?.includes('vnd.pgrst.object+json'));
+test('operator CLI initializes safely, verifies identity and issues single-use enrollment/recovery grants', async t => {
+    const fixture = await authFixture(t);
+    const command = args => promisify(execFile)(process.execPath, ['server/auth-admin.js', ...args], { env: fixture.env });
+    await fixture.db.query('delete from project_states');
+    await fixture.db.query('delete from projects');
+    await command(['--init']);
+    await command(['--init']);
+    assert.equal((await fixture.db.query('select * from projects')).rows.length, 1);
+    assert.equal((await fixture.db.query('select * from project_states')).rows.length, 1);
+    await assert.rejects(command(['--email', 'operator@abist.co.jp', '--nickname', 'Operator']));
+    for (const email of ['operator@example.test', 'operator@absit.co.jp', 'operator@sub.abist.co.jp', 'operator@abist.co.jp.evil.example']) {
+        for (const recover of [false, true]) await assert.rejects(command(['--email', email, '--nickname', 'Operator', '--verified-by', 'Admin: verified in person', ...(recover ? ['--recover'] : [])]), /Only @abist\.co\.jp/);
     }
-    if (req.method === 'POST') {
-        const body = await readBody(req);
-        const rows = Array.isArray(body) ? body : [body];
-        if (table === 'app_users' && rows.some(input => tables.app_users.some(user => user.email === input.email))) {
-            return respond(res, 409, { code: '23505', message: 'duplicate email' });
-        }
-        const saved = rows.map(input => {
-            const existing = table === 'memberships' && tables.memberships.find(row => row.project_id === input.project_id && row.user_id === input.user_id);
-            if (existing) return Object.assign(existing, input);
-            const row = { ...input, ...(input.id ? {} : { id: randomUUID() }) };
-            tables[table].push(row);
-            return row;
-        });
-        if (req.headers.prefer?.includes('return=representation')) return respond(res, 201, project(saved, select), req.headers.accept?.includes('vnd.pgrst.object+json'));
-        return respond(res, 201, null);
-    }
-    return respond(res, 405, { message: 'unsupported method' });
+    assert.equal((await fixture.db.query('select * from app_users')).rows.length, 0);
+    const args = ['--email', '  Operator@ABIST.CO.JP  ', '--nickname', 'Operator', '--verified-by', 'Admin: verified in person'];
+    const { stdout } = await command(args);
+    assert.match(stdout, /Recipient: operator@abist\.co\.jp/);
+    assert.match(stdout, /No email has been sent automatically/);
+    const token = new URL(stdout.trim().split('\n').at(-1)).hash.slice('#enroll='.length);
+    const client = fixture.client();
+    assert.equal((await enroll(client, authenticator(), fixture.origin, token)).status, 200);
+    const state = await client.request('/state');
+    assert.equal(state.data.user.role, 'viewer');
+    assert.equal((await client.request('/commands', { body: { command: 'create', revision: 0, payload: { text: 'Example', consent: true } } })).status, 403);
+    await assert.rejects(command(args));
+    await command([...args, '--recover']);
+    assert.equal((await client.request('/state')).status, 401);
+    const { rows: [privileges] } = await fixture.db.query("select has_table_privilege('anon','auth_passkeys','SELECT') as can_read, has_function_privilege('authenticated','auth_complete(jsonb,jsonb,text,text)','EXECUTE') as can_finish");
+    assert.equal(privileges.can_read, false);
+    assert.equal(privileges.can_finish, false);
 });
 
-function project(rows, select) {
-    if (!select || select === '*') return rows;
-    const columns = select.split(',');
-    return rows.map(row => Object.fromEntries(columns.map(column => [column, row[column]])));
-}
+test('production: invitation-only enrollment, cookie rotation, CSRF, persistence and project permissions', async t => {
+    const fixture = await authFixture(t);
+    const client = fixture.client(), key = authenticator();
+    assert.equal((await client.request('/state')).status, 401);
+    const anonymous = await client.request('/auth/session');
+    assert.match(anonymous.headers.get('set-cookie'), /HttpOnly/);
+    assert.match(anonymous.headers.get('set-cookie'), /SameSite=Lax/);
+    const oldCookie = client.cookie;
+    assert.equal((await client.request('/register', { body: {} })).status, 410);
+    assert.equal((await client.request('/login', { body: {} })).status, 410);
+    assert.equal((await client.request('/auth/register/options', { body: {} })).status, 401);
+    assert.equal((await client.request('/auth/register/options', { body: { token: 'a'.repeat(43) } })).status, 400);
+    const invitation = await fixture.issue();
+    assert.equal((await enroll(client, key, fixture.origin, invitation.token)).status, 200);
+    assert.notEqual(client.cookie, oldCookie);
+    assert.equal((await client.request('/state', { headers: { Cookie: oldCookie } })).status, 401);
+    const state = await client.request('/state');
+    assert.equal(state.data.user.id, invitation.userId);
+    assert.equal(state.data.user.role, 'designer');
+    assert.equal((await client.request('/auth/passkeys/remove', { body: { id: key.id }, csrf: false })).status, 403);
+    assert.equal((await client.request('/auth/passkeys/remove', { body: { id: key.id }, requestOrigin: 'https://evil.example' })).status, 403);
+    assert.equal((await client.request('/auth/passkeys/remove', { body: { id: key.id }, requestOrigin: null })).status, 403);
+    assert.equal((await client.request('/auth/passkeys/remove', { body: { id: key.id } })).status, 409);
+    assert.equal((await client.request('/auth/register/options', { body: { token: invitation.token } })).status, 400);
+    assert.equal((await client.request('/commands', { body: { command: 'create', revision: 0, payload: { text: 'Example', consent: true } } })).status, 200);
+    await fixture.restart();
+    assert.equal((await client.request('/state')).status, 200);
+    await fixture.db.query('delete from memberships where user_id=$1', [invitation.userId]);
+    assert.equal((await client.request('/state')).status, 403);
+    assert.equal((await client.request('/auth/logout', { body: {} })).status, 200);
+    assert.equal((await client.request('/state')).status, 401);
+    const { rows } = await fixture.db.query('select password_hash from app_users where id=$1', [invitation.userId]);
+    assert.equal(rows[0].password_hash, null);
+});
 
-function readBody(req) {
-    return new Promise((resolve, reject) => {
-        let text = '';
-        req.setEncoding('utf8');
-        req.on('data', chunk => { text += chunk; });
-        req.on('end', () => { try { resolve(text ? JSON.parse(text) : null); } catch (error) { reject(error); } });
-        req.on('error', reject);
-    });
-}
+test('company registration rejects database bypasses and legacy invitations and rechecks email at completion', async t => {
+    const fixture = await authFixture(t);
+    for (const email of ['outside@example.test', 'outside@absit.co.jp', 'outside@sub.abist.co.jp', 'outside@abist.co.jp.evil.example', 'outside@abist.co.jp@evil.example', null]) {
+        for (const purpose of ['enroll', 'recover']) await assert.rejects(fixture.issue(email, purpose), /Only @abist\.co\.jp/);
+    }
+    assert.equal((await fixture.db.query('select * from app_users')).rows.length, 0);
+    assert.equal((await fixture.db.query('select * from auth_grants')).rows.length, 0);
 
-function respond(res, status, data, single = false) {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    if (data === null) return res.end();
-    if (single && Array.isArray(data)) return res.end(JSON.stringify(data[0] ?? {}));
-    res.end(JSON.stringify(data));
-}
+    const legacy = await fixture.issue('legacy@abist.co.jp');
+    await fixture.db.query('update app_users set email=$1 where id=$2', ['legacy@example.test', legacy.userId]);
+    const legacyClient = fixture.client();
+    assert.equal((await enroll(legacyClient, authenticator(), fixture.origin, legacy.token)).status, 403);
+    assert.equal((await fixture.db.query('select * from auth_passkeys where user_id=$1', [legacy.userId])).rows.length, 0);
 
-function listen(server) {
-    return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
-}
+    const invitation = await fixture.issue('  Employee.Name@ABIST.CO.JP  ');
+    const client = fixture.client(), key = authenticator();
+    await client.request('/auth/session');
+    const options = await client.request('/auth/register/options', { body: { token: invitation.token, email: 'attacker@example.test' } });
+    assert.equal(options.status, 200);
+    assert.equal(options.data.options.user.name, 'employee.name@abist.co.jp');
+    await fixture.db.query('update app_users set email=$1 where id=$2', ['changed@example.test', invitation.userId]);
+    assert.equal((await client.request('/auth/register/verify', { body: { id: options.data.id, response: key.register(options.data.options, fixture.origin) } })).status, 409);
+    assert.equal((await fixture.db.query('select * from auth_passkeys where user_id=$1', [invitation.userId])).rows.length, 0);
+    assert.equal((await fixture.db.query('select * from auth_grants where user_id=$1', [invitation.userId])).rows.length, 1);
+    assert.equal((await client.request('/state')).status, 401);
+    await fixture.db.query('update app_users set email=$1 where id=$2', ['employee.name@abist.co.jp', invitation.userId]);
+    assert.equal((await enroll(client, key, fixture.origin, invitation.token)).status, 200);
+    const { rows: [user] } = await fixture.db.query('select email from app_users where id=$1', [invitation.userId]);
+    assert.equal(user.email, 'employee.name@abist.co.jp');
+    await client.request('/auth/logout', { body: {} });
+    assert.equal((await login(client, key, fixture.origin)).status, 200);
+});
 
-test('Supabase mode registers, authenticates, loads state, and logs out app users', async t => {
-    const supabasePort = await listen(fakeSupabase);
-    const apiPort = await new Promise(resolve => {
-        const temporary = createServer();
-        temporary.listen(0, '127.0.0.1', () => {
-            const port = temporary.address().port;
-            temporary.close(() => resolve(port));
-        });
-    });
-    const child = spawn(process.execPath, ['server/index.js'], {
-        env: { ...process.env, PORT: String(apiPort), DEMO_MODE: 'false', SUPABASE_URL: `http://127.0.0.1:${supabasePort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-service-key' },
-        stdio: ['ignore', 'pipe', 'pipe']
-    });
-    t.after(async () => {
-        if (child.exitCode === null) {
-            child.kill();
-            await once(child, 'exit');
-        }
-        await new Promise(resolve => fakeSupabase.close(resolve));
-    });
-    await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('server timeout')), 10000);
-        child.stdout.on('data', data => {
-            if (data.toString().includes('API ready')) { clearTimeout(timer); resolve(); }
-        });
-        child.once('exit', () => reject(new Error('server startup failed')));
-    });
+test('grants expire, concurrent enrollment is single-use, and failed enrollment rolls back atomically', async t => {
+    const fixture = await authFixture(t);
+    const first = fixture.client(), second = fixture.client();
+    const invitation = await fixture.issue();
+    await fixture.db.query("update auth_grants set expires_at=now()-interval '1 second'");
+    assert.equal((await enroll(first, authenticator(), fixture.origin, invitation.token)).status, 400);
+    const fresh = await fixture.issue();
+    await second.request('/auth/session');
+    const firstOptions = await first.request('/auth/register/options', { body: { token: fresh.token } });
+    const secondOptions = await second.request('/auth/register/options', { body: { token: fresh.token } });
+    const responses = await Promise.all([
+        first.request('/auth/register/verify', { body: { id: firstOptions.data.id, response: authenticator().register(firstOptions.data.options, fixture.origin) } }),
+        second.request('/auth/register/verify', { body: { id: secondOptions.data.id, response: authenticator().register(secondOptions.data.options, fixture.origin) } })
+    ]);
+    assert.deepEqual(responses.map(response => response.status).sort(), [200, 409]);
+    assert.equal((await fixture.db.query('select * from auth_passkeys where user_id=$1', [fresh.userId])).rows.length, 1);
+    const removed = await fixture.issue('removed@abist.co.jp');
+    await fixture.db.query('delete from memberships where user_id=$1', [removed.userId]);
+    const client = fixture.client(), key = authenticator();
+    assert.equal((await enroll(client, key, fixture.origin, removed.token)).status, 409);
+    assert.equal((await fixture.db.query('select * from auth_passkeys where user_id=$1', [removed.userId])).rows.length, 0);
+    assert.equal((await fixture.db.query('select * from auth_grants where user_id=$1', [removed.userId])).rows.length, 1);
+    await fixture.db.query("insert into memberships(project_id,user_id,display_name,role) values($1,$2,'Restored','viewer')", [fixture.projectId, removed.userId]);
+    assert.equal((await enroll(client, key, fixture.origin, removed.token)).status, 200);
+});
 
-    const request = async (path, { token, body, method = body ? 'POST' : 'GET' } = {}) => {
-        const response = await fetch(`http://127.0.0.1:${apiPort}/api${path}`, {
-            method,
-            headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-            ...(body ? { body: JSON.stringify(body) } : {})
-        });
-        return { status: response.status, data: await response.json() };
-    };
+test('WebAuthn: real signatures reject wrong UV, origin, rpID, challenge, user handle and replay', async t => {
+    const fixture = await authFixture(t);
+    const client = fixture.client(), key = authenticator();
+    const invitation = await fixture.issue();
+    await client.request('/auth/session');
+    for (const override of [{ uv: false }, { rpID: 'evil.example' }]) {
+        const options = await client.request('/auth/register/options', { body: { token: invitation.token } });
+        const response = key.register(options.data.options, fixture.origin, override);
+        assert.equal((await client.request('/auth/register/verify', { body: { id: options.data.id, response } })).status, 400);
+    }
+    assert.equal((await enroll(client, key, fixture.origin, invitation.token)).status, 200);
+    assert.equal((await client.request('/auth/logout', { body: {} })).status, 200);
+    await client.request('/auth/session');
+    for (const variant of ['uv', 'origin', 'rpID', 'challenge', 'signature', 'handle']) {
+        const options = await client.request('/auth/login/options', { body: {} });
+        const response = key.login(variant === 'challenge' ? { ...options.data.options, challenge: 'wrong-challenge' } : options.data.options, variant === 'origin' ? 'https://evil.example' : fixture.origin, variant === 'uv' ? { uv: false } : variant === 'rpID' ? { rpID: 'evil.example' } : variant === 'handle' ? { handle: 'wrong-user' } : {});
+        if (variant === 'signature') response.response.signature = 'a'.repeat(86);
+        assert.equal((await client.request('/auth/login/verify', { body: { id: options.data.id, response } })).status, 400, variant);
+    }
+    const options = await client.request('/auth/login/options', { body: {} });
+    const response = key.login(options.data.options, fixture.origin);
+    const other = fixture.client(); await other.request('/auth/session');
+    assert.equal((await other.request('/auth/login/verify', { body: { id: options.data.id, response } })).status, 400);
+    assert.equal((await client.request('/auth/login/verify', { body: { id: options.data.id, response } })).status, 200);
+    assert.equal((await client.request('/auth/login/verify', { body: { id: options.data.id, response } })).status, 400);
+});
 
-    assert.deepEqual(await request('/config'), { status: 200, data: { demo: false, authMode: 'app-users' } });
-    const registration = await request('/register', { body: { nickname: 'Test User', email: 'TEST@example.test', password: 'secure-test-pass' } });
-    assert.equal(registration.status, 201);
-    assert.ok(registration.data.token);
-    assert.match(tables.app_users[0].id, /^[0-9a-f-]{36}$/i);
-    assert.match(tables.app_users[0].password_hash, /^scrypt\$/);
-    assert.notEqual(tables.app_users[0].password_hash, 'secure-test-pass');
-    assert.equal(tables.memberships[0].role, 'designer');
-
-    const state = await request('/state', { token: registration.data.token });
-    assert.equal(state.status, 200);
-    assert.equal(state.data.user.name, 'Test User');
-    assert.equal(state.data.mode, 'supabase');
-
-    assert.equal((await request('/login', { body: { email: 'test@example.test', password: 'wrong-password' } })).status, 401);
-    const login = await request('/login', { body: { email: 'test@example.test', password: 'secure-test-pass' } });
-    assert.equal(login.status, 200);
-    assert.ok(login.data.token);
-    assert.equal((await request('/register', { body: { nickname: 'Duplicate', email: 'test@example.test', password: 'secure-test-pass' } })).status, 409);
-    assert.equal((await request('/logout', { token: login.data.token, body: {} })).status, 200);
-    assert.equal((await request('/state', { token: login.data.token })).status, 401);
+test('backup, expiry, recovery and migration preserve identity while revoking old credentials and sessions', async t => {
+    const fixture = await authFixture(t);
+    const client = fixture.client(), secondClient = fixture.client();
+    const main = authenticator(), backup = authenticator(), replacement = authenticator();
+    const invitation = await fixture.issue('existing@abist.co.jp');
+    await fixture.db.query('update app_users set password_hash=$1 where id=$2', ['legacy-password-hash', invitation.userId]);
+    assert.equal((await enroll(client, main, fixture.origin, invitation.token)).status, 200);
+    assert.equal((await enroll(client, backup, fixture.origin)).status, 200);
+    assert.equal((await login(secondClient, backup, fixture.origin)).status, 200);
+    assert.equal((await client.request('/auth/passkeys/remove', { body: { id: backup.id } })).status, 200);
+    assert.equal((await secondClient.request('/state')).status, 401);
+    const staleOptions = await client.request('/auth/login/options', { body: {} });
+    const recovered = await fixture.issue('existing@abist.co.jp', 'recover');
+    assert.equal(recovered.userId, invitation.userId);
+    assert.equal((await client.request('/state')).status, 401);
+    assert.equal((await login(secondClient, main, fixture.origin)).status, 400);
+    assert.equal((await enroll(secondClient, replacement, fixture.origin, recovered.token)).status, 200);
+    assert.equal((await secondClient.request('/auth/login/verify', { body: { id: staleOptions.data.id, response: main.login(staleOptions.data.options, fixture.origin) } })).status, 400);
+    assert.equal((await secondClient.request('/state')).data.user.id, invitation.userId);
+    const { rows } = await fixture.db.query('select action,verified_by from auth_audit where user_id=$1', [invitation.userId]);
+    assert.ok(rows.some(row => row.action === 'recover_issued' && row.verified_by));
+    await fixture.db.query("update auth_sessions set authenticated_at=now()-interval '6 minutes' where user_id=$1", [invitation.userId]);
+    assert.equal((await secondClient.request('/auth/register/options', { body: {} })).status, 401);
+    assert.equal((await login(secondClient, replacement, fixture.origin)).status, 200);
+    const options = await secondClient.request('/auth/login/options', { body: {} });
+    await fixture.db.query("update auth_challenges set expires_at=now()-interval '1 second'");
+    assert.equal((await secondClient.request('/auth/login/verify', { body: { id: options.data.id, response: replacement.login(options.data.options, fixture.origin) } })).status, 400);
+    await fixture.db.query("update auth_sessions set expires_at=now()-interval '1 second'");
+    assert.equal((await secondClient.request('/state')).status, 401);
 });
