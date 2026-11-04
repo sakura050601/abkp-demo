@@ -92,7 +92,9 @@ export async function authFixture(t) {
             }
             const where = filters.length ? ' where ' + filters.join(' and ') : '';
             const columns = url.searchParams.get('select');
-            const selection = !columns || columns === '*' ? '*' : columns.split(',').map(identifier).join(',');
+            const selection = table === 'auth_sessions' && columns === '*,app_users(auth_version)'
+                ? 'auth_sessions.*, (select jsonb_build_object(\'auth_version\',auth_version) from app_users where app_users.id=auth_sessions.user_id) as app_users'
+                : !columns || columns === '*' ? '*' : columns.split(',').map(identifier).join(',');
             let sql;
             if (req.method === 'GET') {
                 sql = `select ${selection} from ${identifier(table)}${where}`;

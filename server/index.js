@@ -101,5 +101,5 @@ if (!demo) {
 const clientDir = resolve('dist');
 app.use(express.static(clientDir));
 app.get(/^(?!\/api(?:\/|$)).*/, (_, res) => res.sendFile(join(clientDir, 'index.html')));
-app.use((e, req, res, next) => { if (e instanceof z.ZodError) return res.status(400).json({ error: '入力形式またはファイルサイズが正しくありません。' }); const status = e.status || 500; if (status === 500) console.error('Request failed:', e.message); res.status(status).json({ error: status === 500 ? '保存処理に失敗しました。設定を確認してください。' : e.message }); });
+app.use((e, req, res, next) => { if (e instanceof z.ZodError) return res.status(400).json({ error: '入力形式またはファイルサイズが正しくありません。' }); const status = e.status || 500; if (status === 500) console.error('Request failed:', e.message); const code = ['SESSION_EXPIRED', 'CSRF_MISMATCH'].includes(e.code) ? e.code : undefined; res.status(status).json({ error: status === 500 ? '保存処理に失敗しました。設定を確認してください。' : e.message, ...(code ? { code } : {}) }); });
 app.listen(Number(process.env.PORT) || 3001, '0.0.0.0', () => console.log('API ready: http://127.0.0.1:' + (process.env.PORT || 3001)));

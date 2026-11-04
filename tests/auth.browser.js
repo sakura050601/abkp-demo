@@ -4,7 +4,7 @@ import { chromium, expect } from '@playwright/test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { authFixture } from './auth-support.js';
+import { authFixture, authenticator, enroll } from './auth-support.js';
 
 test('browser: invited passkey enrollment, backup, reauthentication, reload and login on desktop/mobile', { timeout: 90000 }, async t => {
     const fixture = await authFixture(t);
@@ -68,6 +68,8 @@ test('browser: employee email signup, default designer and self-service IT role'
     const browser = await chromium.launch({ channel: 'chromium', headless: true });
     t.after(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    let sessionRequests = 0;
+    page.on('request', request => { if (new URL(request.url()).pathname === '/api/auth/session') sessionRequests++; });
     const cdp = await page.context().newCDPSession(page);
     await cdp.send('WebAuthn.enable');
     await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
@@ -83,11 +85,13 @@ test('browser: employee email signup, default designer and self-service IT role'
     await expect(page.getByText('employee@abist.co.jp', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'パスキーを登録', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'ホーム', exact: true })).toBeVisible();
+    assert.equal(sessionRequests, 1, 'initial session is reused throughout email verification and passkey registration');
     await page.getByRole('button', { name: '管理・セキュリティ', exact: true }).click();
     await expect(page.getByRole('heading', { name: '自分の役割', exact: true })).toBeVisible();
     await page.getByRole('combobox', { name: '役割', exact: true }).selectOption('it');
     await page.getByRole('button', { name: '本人確認して変更' }).click();
     await expect(page.getByRole('button', { name: /IT担当者.*ログアウト/ })).toBeVisible();
+    assert.equal(sessionRequests, 1, 'reauthentication also reuses valid session metadata');
     await page.reload();
     await expect(page.getByRole('button', { name: /IT担当者.*ログアウト/ })).toBeVisible();
     const screenshots = await mkdtemp(join(tmpdir(), 'kp-self-signup-'));
@@ -160,4 +164,61 @@ test('browser: verification handles HTML platform responses without losing input
     await page.unroute('**/api/auth/signup/verify');
     await page.getByRole('button', { name: 'メールアドレスを確認' }).click();
     await expect(page.getByRole('button', { name: 'パスキーを登録', exact: true })).toBeVisible();
+});
+
+test('browser: CSRF synchronizes once before execution; expired registration returns to email without automatic resend', { timeout: 90000 }, async t => {
+    const fixture = await authFixture(t);
+    const browser = await chromium.launch({ channel: 'chromium', headless: true });
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    let sendRequests = 0, verifyRequests = 0, sessionRequests = 0;
+    page.on('request', request => {
+        const path = new URL(request.url()).pathname;
+        if (path === '/api/auth/signup/request') sendRequests++;
+        if (path === '/api/auth/signup/verify') verifyRequests++;
+        if (path === '/api/auth/session') sessionRequests++;
+    });
+    await page.goto(fixture.origin);
+    await page.getByRole('button', { name: '会社メールで新規登録' }).click();
+    await page.getByLabel('会社メールアドレス', { exact: true }).fill('employee');
+    await page.getByLabel('表示名', { exact: true }).fill('Employee');
+    await fixture.db.query('update auth_sessions set csrf_token=$1 where user_id is null', ['rotated-csrf-for-test']);
+    await page.getByRole('button', { name: '確認コードを送信' }).click();
+    await expect(page.getByLabel('確認コード', { exact: true })).toBeVisible();
+    assert.equal(sessionRequests, 2);
+    assert.equal(sendRequests, 2);
+    assert.equal(fixture.mailbox.messages.length, 1);
+    await fixture.db.query("update auth_sessions set expires_at=now()-interval '1 second'");
+    const code = fixture.mailbox.messages.at(-1).text_body.match(/\d{8}/)[0];
+    await page.getByLabel('確認コード', { exact: true }).fill(code);
+    await page.getByRole('button', { name: 'メールアドレスを確認' }).click();
+    await expect(page.getByLabel('会社メールアドレス', { exact: true })).toHaveValue('employee');
+    await expect(page.getByRole('alert')).toContainText('有効期限');
+    assert.equal(verifyRequests, 1);
+    assert.equal(sendRequests, 2);
+    assert.equal(fixture.mailbox.messages.length, 1);
+});
+
+test('browser: account changes during synchronization never replay an operation under another identity', { timeout: 90000 }, async t => {
+    const fixture = await authFixture(t);
+    const invitation = await fixture.issue('first@abist.co.jp');
+    const client = fixture.client();
+    await enroll(client, authenticator(), fixture.origin, invitation.token);
+    const second = await fixture.issue('second@abist.co.jp');
+    const browser = await chromium.launch({ channel: 'chromium', headless: true });
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    const [name, value] = client.cookie.split('=');
+    await page.context().addCookies([{ name, value, url: fixture.origin, httpOnly: true, sameSite: 'Lax' }]);
+    let roleRequests = 0;
+    page.on('request', request => { if (new URL(request.url()).pathname === '/api/profile/role') roleRequests++; });
+    await page.goto(fixture.origin);
+    await page.getByRole('button', { name: '管理・セキュリティ', exact: true }).click();
+    await page.getByRole('combobox', { name: '役割', exact: true }).selectOption('it');
+    await fixture.db.query('update auth_sessions set user_id=$1,csrf_token=$2 where user_id=$3', [second.userId, 'second-account-csrf', invitation.userId]);
+    await page.getByRole('button', { name: '本人確認して変更' }).click();
+    await expect(page.getByRole('button', { name: 'パスキーでログイン' })).toBeVisible();
+    await expect(page.getByRole('alert')).toContainText('別のタブでアカウントが変更');
+    assert.equal(roleRequests, 0);
+    assert.equal((await fixture.db.query('select role from memberships where user_id=$1', [second.userId])).rows[0].role, 'designer');
 });

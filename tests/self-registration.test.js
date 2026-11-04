@@ -4,6 +4,18 @@ import { authFixture, authenticator, enroll, login } from './auth-support.js';
 
 const latestCode = fixture => fixture.mailbox.messages.at(-1).text_body.match(/\d{8}/)[0];
 
+test('session expiry and CSRF mismatch have explicit pre-operation recovery codes', async t => {
+    const fixture = await authFixture(t), client = fixture.client();
+    const expired = await client.request('/auth/login/options', { body: {} });
+    assert.equal(expired.status, 401); assert.equal(expired.data.code, 'SESSION_EXPIRED');
+    await client.request('/auth/session');
+    const stale = await client.request('/auth/login/options', { body: {}, csrf: false });
+    assert.equal(stale.status, 403); assert.equal(stale.data.code, 'CSRF_MISMATCH');
+    assert.equal((await fixture.db.query('select * from auth_challenges')).rows.length, 0);
+    const allowed = await client.request('/auth/login/options', { body: {} });
+    assert.equal(allowed.status, 200);
+});
+
 test('employee self-registration proves company mailbox, defaults to designer and allows only designer/IT switching', async t => {
     const fixture = await authFixture(t);
     const client = fixture.client(), other = fixture.client(), key = authenticator();

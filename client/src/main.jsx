@@ -6,16 +6,26 @@ import './style.css';
 const API = import.meta.env.VITE_API_URL || '';
 const COMPANY_EMAIL_SUFFIX = '@abist.co.jp';
 let csrfToken = '';
+let sessionExpiresAt = 0;
+let sessionUserId = null;
+let sessionRequest = null;
+function clearSession() { csrfToken = ''; sessionExpiresAt = 0; sessionUserId = null; }
+function sessionExpired(message) {
+    clearSession(); window.dispatchEvent(new Event('session-expired'));
+    return Object.assign(new Error(message), { code: 'SESSION_EXPIRED' });
+}
 let enrollmentToken = new URLSearchParams(location.hash.slice(1)).get('enroll') || '';
 if (enrollmentToken) history.replaceState(null, '', location.pathname + location.search);
 const sample = '[01] 藤井：接続部の変更で周辺部品との干渉が心配です。\n[02] 田中：関連図面を洗い出して、組付けと工具の操作空間を確認しましょう。\n[03] 佐藤：単一部品の変更でも組付けに影響します。工具の種類と必要寸法は未確認です。';
 const labels = { draft: '草案', review: '確認待ち', returned: '差戻し', rejected: '却下', core: 'コア登録済み' };
 const roles = { designer: '設計者', senior: 'シニア設計者', viewer: '閲覧者', it: 'IT担当者' };
 const isApprover = user => ['designer', 'senior'].includes(user.role);
-async function request(path, options = {}) {
+async function request(path, options = {}, recovered = false) {
     const token = sessionStorage.getItem('demo-token');
-    const response = await fetch(API + '/api' + path, { ...options, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}), ...options.headers } });
-    if (response.status === 401) window.dispatchEvent(new Event('session-expired'));
+    const originalUserId = sessionUserId;
+    let response;
+    try { response = await fetch(API + '/api' + path, { ...options, signal: options.signal || AbortSignal.timeout(20000), credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}), ...options.headers } }); }
+    catch (error) { throw new Error(error.name === 'TimeoutError' ? '通信がタイムアウトしました。処理結果を確認してから再試行してください。' : 'サーバーに接続できません。接続状況を確認してから再試行してください。'); }
     const type = (response.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
     if (type !== 'application/json' && !type.endsWith('+json')) {
         const message = response.status >= 500 ? 'サーバーが一時的に利用できません。少し待ってから再試行してください。' : 'サーバーから想定外の応答が届きました。接続先のURLを確認してください。';
@@ -23,10 +33,23 @@ async function request(path, options = {}) {
     }
     let data;
     try { data = await response.json(); } catch { throw new Error(`サーバーの応答を読み取れませんでした。再試行してください。 (HTTP ${response.status})`); }
+    if (response.status === 403 && data?.code === 'CSRF_MISMATCH' && !recovered) {
+        const synced = await session(true);
+        if ((synced.userId || null) !== originalUserId) throw sessionExpired('別のタブでアカウントが変更されました。パスキーでログインし直してください。');
+        return request(path, options, true);
+    }
+    if (response.status === 401) throw sessionExpired(data?.error || '認証の有効期限が切れました。もう一度認証してください。');
     if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : '通信に失敗しました');
+    if (typeof data?.csrfToken === 'string') csrfToken = data.csrfToken;
+    if (data?.expiresAt) sessionExpiresAt = Date.parse(data.expiresAt) || 0;
+    if (Object.hasOwn(data || {}, 'userId')) sessionUserId = data.userId;
     return data;
 }
-async function session() { const data = await request('/auth/session'); csrfToken = data.csrfToken; return data; }
+async function session(force = false) {
+    if (!force && csrfToken && sessionExpiresAt > Date.now() + 5000) return { csrfToken, userId: sessionUserId, authenticated: !!sessionUserId };
+    if (!sessionRequest) sessionRequest = request('/auth/session').finally(() => { sessionRequest = null; });
+    return sessionRequest;
+}
 async function passkeyLogin() { await session(); const challenge = await request('/auth/login/options', { method: 'POST', body: '{}' }); const response = await startAuthentication({ optionsJSON: challenge.options }); const data = await request('/auth/login/verify', { method: 'POST', body: JSON.stringify({ id: challenge.id, response }) }); csrfToken = data.csrfToken; }
 async function addPasskey(token, name) { await session(); const challenge = await request('/auth/register/options', { method: 'POST', body: JSON.stringify({ ...(token ? { token } : {}), name }) }); const response = await startRegistration({ optionsJSON: challenge.options }); const data = await request('/auth/register/verify', { method: 'POST', body: JSON.stringify({ id: challenge.id, response }) }); csrfToken = data.csrfToken; }
 const Badge = ({ status }) => <span className={'badge ' + status}>{labels[status] || status}</span>;
@@ -37,7 +60,7 @@ function App() {
     async function run(fn) { setError(''); setBusy(true); try { return await fn(); } catch (e) { setError(e.message); return null; } finally { setBusy(false); } }
     async function command(command, payload) { return run(async () => { const r = await request('/commands', { method: 'POST', body: JSON.stringify({ command, payload, revision: data.revision }) }); await refresh(); setNotice('保存しました'); setTimeout(() => setNotice(''), 2500); return r; }); }
     function navigate(p) { setPage(p); setSelected(null); setMenu(false); setQuery(''); setError(''); }
-    async function logout() { await run(async () => { await request(config.demo ? '/logout' : '/auth/logout', { method: 'POST', body: '{}' }); sessionStorage.removeItem('demo-token'); csrfToken = ''; setData(null); }); }
+    async function logout() { await run(async () => { await request(config.demo ? '/logout' : '/auth/logout', { method: 'POST', body: '{}' }); sessionStorage.removeItem('demo-token'); clearSession(); setData(null); }); }
     if (!config) return <div className="loading"><Layers size={32} /><p>{error || 'ワークスペースを準備しています…'}</p><button onClick={() => location.reload()}>再試行</button></div>;
     if (!data) { const LoginForm = !config.demo && !enrollmentToken ? EmployeeLogin : Login; return <LoginForm config={config} error={error} busy={busy} run={run} login={body => run(async () => { if (config.demo) { const result = await request('/login', { method: 'POST', body: JSON.stringify(body) }); sessionStorage.setItem('demo-token', result.token); } else if (body.token) { await addPasskey(body.token, body.name); enrollmentToken = ''; } else await passkeyLogin(); await refresh(); })} />; }
     const { payload: s, user, users } = data; const card = s.cards.find(c => c.id === selected); const pending = s.cards.filter(c => c.status === 'review'); const mine = isApprover(user) ? pending.filter(c => c.route[c.step]?.assignees.includes(user.id) && !c.votes.includes(user.id)) : [];
@@ -73,6 +96,7 @@ function Workbench({ s, user, users, mine, pending, open, navigate }) {
 function EmployeeLogin({ error, busy, login, run }) {
     const [stage, setStage] = useState('login'), [emailName, setEmailName] = useState(''), [email, setEmail] = useState(''), [nickname, setNickname] = useState(''), [code, setCode] = useState(''), [verification, setVerification] = useState(null), [token, setToken] = useState(''), [cooldown, setCooldown] = useState(0);
     const supported = window.isSecureContext && browserSupportsWebAuthn();
+    useEffect(() => { const expired = () => { setToken(''); setCode(''); setVerification(null); setStage(current => current === 'login' ? 'login' : 'email'); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, []);
     useEffect(() => { if (!cooldown) return; const timer = setTimeout(() => setCooldown(value => Math.max(0, value - 1)), 1000); return () => clearTimeout(timer); }, [cooldown]);
     async function sendCode() { await session(); const response = await request('/auth/signup/request', { method: 'POST', body: JSON.stringify({ email: emailName.trim() + COMPANY_EMAIL_SUFFIX, nickname }) }); setVerification(response); setEmail(response.email); setCode(''); setCooldown(60); setStage('code'); }
     function changeEmailName(value) { const trimmed = value.trim(); setEmailName(trimmed.toLowerCase().endsWith(COMPANY_EMAIL_SUFFIX) ? trimmed.slice(0, -COMPANY_EMAIL_SUFFIX.length) : trimmed); }

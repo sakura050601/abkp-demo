@@ -15,7 +15,7 @@ export function authDatabaseError(error, status) {
     return new Error(`Authentication database unavailable [HTTP ${httpStatus}; code ${code}]. ${hint}`);
 }
 const secret = () => randomBytes(32).toString('base64url');
-const failure = (status = 400, message = '認証を完了できません。最初からやり直してください。') => Object.assign(new Error(message), { status });
+const failure = (status = 400, message = '認証を完了できません。最初からやり直してください。', code) => Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
 const same = (left, right) => typeof left === 'string' && typeof right === 'string' && Buffer.byteLength(left) === Buffer.byteLength(right) && timingSafeEqual(Buffer.from(left), Buffer.from(right));
 const grantInput = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), name: z.string().trim().min(1).max(60).default('パスキー') });
 const responseInput = z.object({ id: z.uuid(), response: z.object({ id: z.string().min(1).max(2048) }).passthrough() });
@@ -35,6 +35,19 @@ export function installAuth(app, db) {
     const config = authConfig();
     const mailer = createMailer(config.origin);
     const cookieOptions = { httpOnly: true, secure: config.secure, sameSite: 'lax', path: '/' };
+    let cleanupAfter = 0;
+    function scheduleCleanup(res) {
+        if (Date.now() < cleanupAfter) return;
+        cleanupAfter = Date.now() + 900000;
+        res.once('finish', () => {
+            const now = new Date().toISOString();
+            (async () => {
+                await result(db.from('auth_challenges').delete().lt('expires_at', now));
+                await result(db.from('auth_grants').delete().lt('expires_at', now));
+                await result(db.from('auth_sessions').delete().lt('expires_at', now));
+            })().catch(() => console.warn('Expired authentication record cleanup will retry later.'));
+        });
+    }
     function tokenFrom(req) {
         const values = (req.headers.cookie || '').split(';').map(part => part.trim()).filter(part => part.startsWith(config.cookieName + '='));
         return values.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(values[0].slice(config.cookieName.length + 1)) ? values[0].slice(config.cookieName.length + 1) : null;
@@ -42,18 +55,15 @@ export function installAuth(app, db) {
     async function sessionFor(req) {
         const token = tokenFrom(req);
         if (!token) return null;
-        const session = await result(db.from('auth_sessions').select('*').eq('token_hash', digest(token)).gt('expires_at', new Date().toISOString()).maybeSingle());
-        if (session?.user_id) {
-            const user = await result(db.from('app_users').select('auth_version').eq('id', session.user_id).maybeSingle());
-            if (!user || user.auth_version !== session.auth_version) return null;
-        }
+        const session = await result(db.from('auth_sessions').select('*,app_users(auth_version)').eq('token_hash', digest(token)).gt('expires_at', new Date().toISOString()).maybeSingle());
+        if (session?.user_id && (!session.app_users || session.app_users.auth_version !== session.auth_version)) return null;
         return session;
     }
     async function issueSession(res, context, credential) {
         const token = secret(), csrf = secret();
         await result(db.rpc('auth_complete', { p_context: context, p_credential: credential, p_new_token_hash: digest(token), p_csrf_token: csrf }));
         res.cookie(config.cookieName, token, { ...cookieOptions, maxAge: 8 * 3600000 });
-        res.json({ ok: true, csrfToken: csrf });
+        res.json({ ok: true, csrfToken: csrf, userId: context.user_id, authenticated: true, expiresAt: new Date(Date.now() + 8 * 3600000).toISOString() });
     }
     const recent = session => {
         if (!session?.user_id || !session.authenticated_at || Date.parse(session.authenticated_at) < Date.now() - 300000) throw failure(401, 'ログインし直してから操作してください。');
@@ -66,7 +76,10 @@ export function installAuth(app, db) {
                 if (req.headers.origin !== config.origin || !req.is('application/json')) throw failure(403, '送信元を確認できません。');
             }
             req.authSession = await sessionFor(req);
-            if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && (!req.authSession || !same(req.headers['x-csrf-token'], req.authSession.csrf_token))) throw failure(403, 'セッションを再読み込みしてください。');
+            if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+                if (!req.authSession) throw failure(401, '認証の有効期限が切れました。ログインまたはメール確認をやり直してください。', 'SESSION_EXPIRED');
+                if (!same(req.headers['x-csrf-token'], req.authSession.csrf_token)) throw failure(403, '認証情報の同期が必要です。もう一度お試しください。', 'CSRF_MISMATCH');
+            }
             next();
         } catch (error) { next(error); }
     });
@@ -76,13 +89,11 @@ export function installAuth(app, db) {
             if (!session) {
                 const token = secret();
                 session = { token_hash: digest(token), csrf_token: secret(), expires_at: new Date(Date.now() + 600000).toISOString() };
-                await result(db.from('auth_challenges').delete().lt('expires_at', new Date().toISOString()));
-                await result(db.from('auth_grants').delete().lt('expires_at', new Date().toISOString()));
-                await result(db.from('auth_sessions').delete().lt('expires_at', new Date().toISOString()));
                 await result(db.from('auth_sessions').insert(session));
                 res.cookie(config.cookieName, token, { ...cookieOptions, maxAge: 600000 });
             }
-            res.json({ csrfToken: session.csrf_token, authenticated: !!session.user_id });
+            scheduleCleanup(res);
+            res.json({ csrfToken: session.csrf_token, authenticated: !!session.user_id, userId: session.user_id || null, expiresAt: session.expires_at });
         } catch (error) { next(error); }
     });
     app.use('/api/auth', authLimit);
