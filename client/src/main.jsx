@@ -12,7 +12,20 @@ const sample = '[01] 藤井：接続部の変更で周辺部品との干渉が�
 const labels = { draft: '草案', review: '確認待ち', returned: '差戻し', rejected: '却下', core: 'コア登録済み' };
 const roles = { designer: '設計者', senior: 'シニア設計者', viewer: '閲覧者', it: 'IT担当者' };
 const isApprover = user => ['designer', 'senior'].includes(user.role);
-async function request(path, options = {}) { const token = sessionStorage.getItem('demo-token'); const r = await fetch(API + '/api' + path, { ...options, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}), ...options.headers } }); const d = await r.json(); if (!r.ok) { if (r.status === 401) window.dispatchEvent(new Event('session-expired')); throw new Error(d.error || '通信に失敗しました'); } return d; }
+async function request(path, options = {}) {
+    const token = sessionStorage.getItem('demo-token');
+    const response = await fetch(API + '/api' + path, { ...options, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}), ...options.headers } });
+    if (response.status === 401) window.dispatchEvent(new Event('session-expired'));
+    const type = (response.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+    if (type !== 'application/json' && !type.endsWith('+json')) {
+        const message = response.status >= 500 ? 'サーバーが一時的に利用できません。少し待ってから再試行してください。' : 'サーバーから想定外の応答が届きました。接続先のURLを確認してください。';
+        throw new Error(`${message} (HTTP ${response.status})`);
+    }
+    let data;
+    try { data = await response.json(); } catch { throw new Error(`サーバーの応答を読み取れませんでした。再試行してください。 (HTTP ${response.status})`); }
+    if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : '通信に失敗しました');
+    return data;
+}
 async function session() { const data = await request('/auth/session'); csrfToken = data.csrfToken; return data; }
 async function passkeyLogin() { await session(); const challenge = await request('/auth/login/options', { method: 'POST', body: '{}' }); const response = await startAuthentication({ optionsJSON: challenge.options }); const data = await request('/auth/login/verify', { method: 'POST', body: JSON.stringify({ id: challenge.id, response }) }); csrfToken = data.csrfToken; }
 async function addPasskey(token, name) { await session(); const challenge = await request('/auth/register/options', { method: 'POST', body: JSON.stringify({ ...(token ? { token } : {}), name }) }); const response = await startRegistration({ optionsJSON: challenge.options }); const data = await request('/auth/register/verify', { method: 'POST', body: JSON.stringify({ id: challenge.id, response }) }); csrfToken = data.csrfToken; }

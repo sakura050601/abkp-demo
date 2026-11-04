@@ -128,3 +128,36 @@ test('browser: fixed company suffix composes numeric and dotted email usernames 
     }
     console.log(`Fixed company email screenshots: ${screenshots}`);
 });
+
+test('browser: verification handles HTML platform responses without losing input or automatically replaying codes', { timeout: 90000 }, async t => {
+    const fixture = await authFixture(t);
+    const browser = await chromium.launch({ channel: 'chromium', headless: true });
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(fixture.origin);
+    await page.getByRole('button', { name: '会社メールで新規登録' }).click();
+    await page.getByLabel('会社メールアドレス', { exact: true }).fill('employee');
+    await page.getByLabel('表示名', { exact: true }).fill('Employee');
+    await page.getByRole('button', { name: '確認コードを送信' }).click();
+    await expect(page.getByLabel('確認コード', { exact: true })).toBeVisible();
+    const code = fixture.mailbox.messages.at(-1).text_body.match(/\d{8}/)[0];
+    await page.getByLabel('確認コード', { exact: true }).fill(code);
+    let intercepted = 0;
+    for (const status of [503, 200]) {
+        await page.route('**/api/auth/signup/verify', route => { intercepted++; return route.fulfill({ status, contentType: 'text/html', body: '<!DOCTYPE html><html><body>Platform unavailable</body></html>' }); });
+        await page.getByRole('button', { name: 'メールアドレスを確認' }).click();
+        await expect(page.getByRole('alert')).toContainText(`HTTP ${status}`);
+        await expect(page.getByRole('alert')).not.toContainText('Unexpected token');
+        await expect(page.getByLabel('確認コード', { exact: true })).toHaveValue(code);
+        await page.unroute('**/api/auth/signup/verify');
+    }
+    assert.equal(intercepted, 2);
+    assert.equal(fixture.mailbox.messages.length, 1);
+    await page.route('**/api/auth/signup/verify', route => route.fulfill({ status: 502, contentType: 'application/json', body: 'invalid JSON' }));
+    await page.getByRole('button', { name: 'メールアドレスを確認' }).click();
+    await expect(page.getByRole('alert')).toContainText('HTTP 502');
+    await expect(page.getByLabel('確認コード', { exact: true })).toHaveValue(code);
+    await page.unroute('**/api/auth/signup/verify');
+    await page.getByRole('button', { name: 'メールアドレスを確認' }).click();
+    await expect(page.getByRole('button', { name: 'パスキーを登録', exact: true })).toBeVisible();
+});
