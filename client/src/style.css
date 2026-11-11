@@ -2528,3 +2528,35 @@ header {
         gap: 0
     }
 }
+.header-right .profile-avatar {
+    display: inline-flex;
+    border: 0;
+    cursor: pointer;
+}
+.personal-settings .personal-account {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 24px;
+}
+.personal-account p {
+    margin: 4px 0 0;
+}
+.personal-account button {
+    margin-left: auto;
+}
+.platform-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+    gap: 14px;
+}
+.platform-microsoft {
+    grid-column: 1 / -1;
+}
+.platform-card h3 {
+    margin: 0 0 10px;
+}
+.platform-integration h4 {
+    margin: 16px 0 8px;
+}
