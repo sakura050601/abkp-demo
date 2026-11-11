@@ -1,3 +1,4 @@
+import { installTeams } from './teams.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -43,7 +44,7 @@ app.use('/api', async (req, res, next) => {
         const token = (req.headers.authorization || '').replace(/^Bearer /, '');
         const session = demo ? sessions.get(token) : req.authSession;
         if (!session || (demo ? session.expires < Date.now() : !session.user_id)) { if (demo) sessions.delete(token); return res.status(401).json({ error: 'ログインしてください。' }); }
-        if (demo) { req.actor = session.user; req.project = 'demo'; req.users = demoUsers; }
+        if (demo) { req.demoSession = session; req.actor = session.user; req.project = 'demo'; req.users = demoUsers; }
         else {
             const { data: member, error: e } = await db.from('memberships').select('project_id,user_id,display_name,role').eq('user_id', session.user_id).eq('project_id', session.project_id).maybeSingle(); if (e) throw e;
             if (!member) return res.status(403).json({ error: 'プロジェクトへの登録がありません。管理者に確認してください。' });
@@ -94,6 +95,9 @@ app.post('/api/commands', async (req, res, next) => {
         }); queue = work.catch(() => { }); res.json(await work);
     } catch (e) { next(e); }
 });
+installTeams(app, {db,demo,mutate: async (req,fn) => {
+ const work=queue.then(async()=>{const record=await read(req.project);const result=fn(record);record.revision++;await save(req.project,record);return result;});queue=work.catch(()=>{});return work;
+}});
 if (!demo) {
     const { error, status } = await db.from('auth_sessions').select('token_hash').limit(1);
     if (error) throw authDatabaseError(error, status);
