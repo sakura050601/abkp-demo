@@ -89,9 +89,15 @@ app.post('/api/profile/name', async (req, res, next) => {
 });
 const file = z.object({ name: z.string().max(180), type: z.string().max(120), size: z.number().max(2 * 1024 * 1024), data: z.string().max(2800000).regex(/^data:[^;]*;base64,[A-Za-z0-9+/=]*$/) });
 const schema = z.object({ command: z.enum(['create', 'submit', 'revise', 'decide', 'candidate']), revision: z.number().int().nonnegative(), payload: z.object({ id: z.string().max(80).optional(), version: z.number().int().optional(), text: z.string().max(50000).optional(), files: z.array(file).max(2).optional(), consent: z.boolean().optional(), problem: z.string().max(500).optional(), route: z.array(z.object({ type: z.enum(['review', 'final']), label: z.string().max(80), assignees: z.array(z.string().max(80)).max(2) })).max(8).optional(), decision: z.enum(['approve', 'return', 'reject']).optional(), reason: z.string().max(2000).optional(), importance: z.string().max(10).optional(), priority: z.string().max(5).optional(), category: z.string().max(10).optional() }) });
+const directiveImportSchema = z.object({
+    command: z.literal('import_directives'),
+    revision: z.number().int().nonnegative(),
+    payload: z.object({ ledger: z.string(), filename: z.string().max(255).optional(), consent: z.boolean() }).strict()
+});
 app.post('/api/commands', async (req, res, next) => {
     try {
-        const input = schema.parse(req.body); const work = queue.then(async () => {
+        const importing = req.body?.command === 'import_directives';
+        const input = (importing ? directiveImportSchema : schema).parse(req.body); const work = queue.then(async () => {
             if (!demo) {
                 const { data: team, error } = await db.from('memberships').select('user_id,display_name,role').eq('project_id', req.project);
                 if (error) throw error;
@@ -100,7 +106,11 @@ app.post('/api/commands', async (req, res, next) => {
                 if (!actor) throw Object.assign(new Error('プロジェクトへのアクセス権がありません。'), { status: 403 });
                 req.actor = actor;
             }
-            const record = await read(req.project); if (record.revision !== input.revision) throw Object.assign(new Error('更新があります。再読み込みして操作し直してください。'), { status: 409 }); const id = apply(record.payload, req.actor, req.users, input.command, input.payload); record.revision++; await save(req.project, record); return { id };
+            const record = await read(req.project);
+            if (record.revision !== input.revision) throw Object.assign(new Error('更新があります。再読み込みして操作し直してください。'), { status: 409 });
+            const result = apply(record.payload, req.actor, req.users, input.command, input.payload);
+            if (!importing || result.imported > 0) { record.revision++; await save(req.project, record); }
+            return importing ? result : { id: result };
         }); queue = work.catch(() => { }); res.json(await work);
     } catch (e) { next(e); }
 });

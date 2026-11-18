@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { parseLedger } from './directives.js';
 export const demoUsers = [{ id: 'author', name: '藤井 美咲', role: 'designer' }, { id: 'reviewer', name: '田中 健一', role: 'designer' }, { id: 'senior', name: '佐藤 直樹', role: 'senior' }, { id: 'manager', name: '山本 葵', role: 'supervisor' }, { id: 'it', name: '伊藤 遥', role: 'it' }];
 export const sampleText = '[01] 藤井：接続部の変更で周辺部品との干渉が心配です。\n[02] 田中：関連図面を洗い出して、組付けと工具の操作空間を確認しましょう。\n[03] 佐藤：単一部品の変更でも組付けに影響します。工具の種類と必要寸法は未確認です。';
 export const emptyState = () => ({ raw: [], cards: [], cores: [], events: [] });
@@ -19,6 +21,39 @@ export function validateRoute(route, users) {
     if (route.slice(0, -1).some(r => r.type !== 'review' || r.assignees.length !== 1)) fail('前工程は1名の確認者を指定してください。');
 }
 export function apply(s, actor, users, command, p) {
+    if (command === 'import_directives') {
+        if (!p.consent) fail('保存・利用許可の確認が必要です。');
+        const { directives, ...metadata } = parseLedger(p.ledger);
+        const existing = new Map(s.cards.filter(c => c.directive).map(c => [c.directive.id, c.directive]));
+        const fresh = [], conflicts = [];
+        let skipped = 0;
+        for (const instruction of directives) {
+            if (!existing.has(instruction.id)) fresh.push(instruction);
+            else if (isDeepStrictEqual(existing.get(instruction.id), instruction)) skipped++;
+            else conflicts.push(instruction.id);
+        }
+        if (conflicts.length) fail(`既存の指示と内容が異なります（上書きしません）: ${conflicts.slice(0, 8).join(', ')}${conflicts.length > 8 ? ` ほか ${conflicts.length - 8} 件` : ''}`, 409);
+        if (!fresh.length) return { imported: 0, skipped };
+        const importedAt = new Date().toISOString();
+        const batch = { id: randomUUID(), filename: p.filename || '', importedAt, ...metadata };
+        (s.directiveImports ??= []).unshift(batch);
+        const rows = fresh.map(directive => {
+            const raw = { id: 'RAW-' + randomUUID(), owner: actor.id, text: JSON.stringify(directive, null, 2), files: [], revision: 1, scope: 'project', createdAt: importedAt, source: { provider: 'directive-ledger', batchId: batch.id } };
+            const title = Array.from(directive.text.replace(/\s+/g, ' '));
+            const card = {
+                id: 'KC-' + randomUUID(), rawId: raw.id, rawRevision: 1, owner: actor.id, version: 1, versions: [],
+                directive, title: title.slice(0, 90).join('') + (title.length > 90 ? '…' : ''),
+                problem: directive.scope, conditions: directive.scope, action: directive.text, evidence: directive.source,
+                claim: 'unverified', resolved: true, simulation: false, status: 'draft', route: [], step: 0,
+                votes: [], importance: '重要', priority: 'P2', category: '副知識', createdAt: importedAt
+            };
+            return { raw, card };
+        });
+        s.raw.unshift(...rows.map(row => row.raw));
+        s.cards.unshift(...rows.map(row => row.card));
+        for (const { card } of rows) event(s, actor, '台帳取込・草案生成', card.id, card.directive.id);
+        return { imported: fresh.length, skipped };
+    }
     if (command === 'create') {
         if (!p.consent) fail('保存・利用許可の確認が必要です。');
         if (!p.text?.trim() && !p.files?.length) fail('資料を追加してください。');
@@ -29,7 +64,7 @@ export function apply(s, actor, users, command, p) {
     const c = s.cards.find(c => c.id === p.id); if (!c) fail('カードが見つかりません。', 404);
     if (p.version !== c.version) fail('版が更新されました。再読み込みしてください。', 409);
     if (command === 'candidate') {
-        if (c.owner !== actor.id || c.status !== 'draft') fail('草案の申請者のみ操作できます。', 403);
+        if (c.owner !== actor.id || c.status !== 'draft' || c.directive) fail('このカードの候補は変更できません。', 403);
         if (!['変更の影響範囲', '図面の更新管理', 'hold'].includes(p.problem)) fail('候補が無効です。');
         c.problem = p.problem; event(s, actor, p.problem === 'hold' ? '候補を保留' : '候補を選択', c.id, p.problem); return c.id;
     }
@@ -37,8 +72,9 @@ export function apply(s, actor, users, command, p) {
         if (c.owner !== actor.id) fail('申請者のみ操作できます。', 403);
         if (c.status !== 'draft') fail('申請可能な状態ではありません。');
         validateRoute(p.route, users);
-        if (!p.problem || p.problem === 'hold' || p.problem === '未確認' || !c.resolved) fail('未確認の候補は保留してください。資料を追加し、再確認が必要です。');
-        c.problem = p.problem; c.claim = 'hypothesis'; c.route = p.route; c.step = 0; c.votes = []; c.status = 'review'; event(s, actor, '承認申請', c.id); return c.id;
+        const problem = c.directive?.scope ?? p.problem;
+        if (!problem || (!c.directive && ['hold', '未確認'].includes(problem)) || !c.resolved) fail('未確認の候補は保留してください。資料を追加し、再確認が必要です。');
+        c.problem = problem; c.claim = 'hypothesis'; c.route = p.route; c.step = 0; c.votes = []; c.status = 'review'; event(s, actor, '承認申請', c.id); return c.id;
     }
     if (command === 'revise') {
         if (c.owner !== actor.id || !['returned', 'core', 'draft'].includes(c.status)) fail('このカードは改訂できません。', 403);
