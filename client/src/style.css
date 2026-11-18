@@ -2546,13 +2546,19 @@ header {
 .personal-account button {
     margin-left: auto;
 }
+.profile-edit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+}
+.profile-edit-grid h2 {
+    margin: 0 0 16px;
+}
 .platform-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
     gap: 14px;
-}
-.platform-microsoft {
-    grid-column: 1 / -1;
 }
 .platform-card h3 {
     margin: 0 0 10px;

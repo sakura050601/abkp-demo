@@ -7,7 +7,7 @@ import { emptyState } from '../shared/domain.js';
 
 const { values } = parseArgs({
     options: {
-        email: { type: 'string' }, nickname: { type: 'string' }, role: { type: 'string', default: 'viewer' },
+        email: { type: 'string' }, nickname: { type: 'string' }, role: { type: 'string', default: 'designer' },
         project: { type: 'string' }, 'verified-by': { type: 'string' }, recover: { type: 'boolean', default: false },
         init: { type: 'boolean', default: false }, 'workspace-name': { type: 'string', default: '設計事業部' }
     }
@@ -29,7 +29,7 @@ if (values.init) {
     if (state.error) throw new Error(state.error.message);
     console.log(`Workspace ready: ${project.id}. Existing data was preserved; no demo accounts were created.`);
 } else {
-    const input = z.object({ email: companyEmail, nickname: z.string().trim().min(1).max(60).optional(), role: z.enum(['designer', 'senior', 'viewer']), project: z.uuid().optional(), 'verified-by': z.string().trim().min(3).max(200), recover: z.boolean() }).parse(values);
+    const input = z.object({ email: companyEmail, nickname: z.string().trim().min(1).max(60).optional(), role: z.enum(['designer', 'senior', 'supervisor', 'it']), project: z.uuid().optional(), 'verified-by': z.string().trim().min(3).max(200), recover: z.boolean() }).parse(values);
     if (!input.recover && !input.nickname) throw new Error('--nickname is required for invitations');
     const token = randomBytes(32).toString('base64url');
     const { error } = await db.rpc('auth_issue_grant', {

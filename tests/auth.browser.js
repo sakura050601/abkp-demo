@@ -57,7 +57,8 @@ test('browser: invited passkey enrollment, backup, reauthentication, reload and 
     await page.getByRole('button', { name: 'メニュー', exact: true }).click();
     await page.getByRole('button', { name: /個人設定$/ }).click();
     await expect(page.getByRole('heading', { name: '個人設定', exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Azure / Microsoft Entra', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'AWS', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Teams', exact: true })).toBeVisible();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.getByRole('button', { name: /ログアウト/ }).click();
     await expect(page.getByRole('button', { name: 'パスキーでログイン' })).toBeVisible();
@@ -67,7 +68,7 @@ test('browser: invited passkey enrollment, backup, reauthentication, reload and 
     console.log(`Browser screenshots: ${screenshots}`);
 });
 
-test('browser: employee email signup, default designer and self-service IT role', { timeout: 90000 }, async t => {
+test('browser: employee email signup, profile role and name changes', { timeout: 90000 }, async t => {
     const fixture = await authFixture(t);
     const browser = await chromium.launch({ channel: 'chromium', headless: true });
     t.after(() => browser.close());
@@ -90,19 +91,29 @@ test('browser: employee email signup, default designer and self-service IT role'
     await page.getByRole('button', { name: 'パスキーを登録', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'ホーム', exact: true })).toBeVisible();
     assert.equal(sessionRequests, 1, 'initial session is reused throughout email verification and passkey registration');
-    await page.getByRole('button', { name: '管理・セキュリティ', exact: true }).click();
+    await page.getByRole('button', { name: '個人設定を開く', exact: true }).click();
     await expect(page.getByRole('heading', { name: '自分の役割', exact: true })).toBeVisible();
-    await page.getByRole('combobox', { name: '役割', exact: true }).selectOption('it');
+    const rolePicker = page.getByRole('combobox', { name: '役割', exact: true });
+    await expect(rolePicker.locator('option')).toHaveText(['初級設計者', '上級設計者', '上級管理者', 'IT技術者（承認不可）']);
+    await rolePicker.selectOption('supervisor');
     await page.getByRole('button', { name: '本人確認して変更' }).click();
-    await expect(page.getByRole('button', { name: /IT担当者.*個人設定/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /上級管理者.*個人設定/ })).toBeVisible();
+    await rolePicker.selectOption('it');
+    await page.getByRole('button', { name: '本人確認して変更' }).click();
+    await expect(page.getByRole('button', { name: /IT技術者.*個人設定/ })).toBeVisible();
     assert.equal(sessionRequests, 1, 'reauthentication also reuses valid session metadata');
+    await page.getByLabel('表示名', { exact: true }).fill('Employee Updated');
+    await page.getByRole('button', { name: '表示名を保存', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'アカウント情報', exact: true }).getByText('Employee Updated', { exact: true })).toBeVisible();
     await page.reload();
-    await expect(page.getByRole('button', { name: /IT担当者.*個人設定/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /IT技術者.*個人設定/ })).toBeVisible();
     await page.getByRole('button', { name: '個人設定を開く', exact: true }).click();
     await expect(page.getByRole('heading', { name: '個人設定', exact: true })).toBeVisible();
-    await expect(page.getByRole('region', { name: 'アカウント情報', exact: true }).getByText('IT担当者', { exact: true })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'アカウント情報', exact: true }).getByText('IT技術者', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'AWS', exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Team Cloud', exact: true })).toBeVisible();
+    await expect(page.getByText('AWS 上で稼働中', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Teams', exact: true })).toBeVisible();
+    await expect(page.getByText('未設定', { exact: true })).toBeVisible();
     const screenshots = await mkdtemp(join(tmpdir(), 'kp-self-signup-'));
     await page.getByRole('button', { name: '管理・セキュリティ', exact: true }).click();
     await page.screenshot({ path: join(screenshots, 'desktop-it.png'), fullPage: true });

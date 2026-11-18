@@ -11,7 +11,8 @@ const accounts = [
     { key: 'author', nickname: '藤井 美咲', email: 'author@example.test', role: 'designer' },
     { key: 'reviewer', nickname: '田中 健一', email: 'reviewer@example.test', role: 'designer' },
     { key: 'senior', nickname: '佐藤 直樹', email: 'senior@example.test', role: 'senior' },
-    { key: 'viewer', nickname: '山本 葵', email: 'viewer@example.test', role: 'viewer' }
+    { key: 'manager', nickname: '山本 葵', email: 'manager@example.test', role: 'supervisor' },
+    { key: 'it', nickname: '伊藤 遥', email: 'it@example.test', role: 'it' }
 ];
 const fail = (error) => { if (error) throw error; };
 

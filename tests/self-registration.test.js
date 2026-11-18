@@ -36,10 +36,20 @@ test('employee self-registration proves company mailbox, defaults to designer an
     assert.equal((await enroll(client, key, fixture.origin, verified.data.token)).status, 200);
     let state = await client.request('/state');
     assert.equal(state.data.user.role, 'designer');
+    assert.equal((await client.request('/profile/name', { body: { name: '  ' } })).status, 400);
+    assert.equal((await client.request('/profile/name', { body: { name: 'Updated Name' } })).status, 200);
+    state = await client.request('/state');
+    assert.equal(state.data.user.name, 'Updated Name');
+    assert.equal((await fixture.db.query('select nickname from app_users where id=$1', [state.data.user.id])).rows[0].nickname, 'Updated Name');
+    assert.equal((await fixture.db.query('select display_name from memberships where user_id=$1', [state.data.user.id])).rows[0].display_name, 'Updated Name');
     await fixture.db.query('update project_states set payload=$1 where project_id=$2', [JSON.stringify({ raw: [], cards: [{ id: 'PENDING', status: 'review', route: [{ assignees: [state.data.user.id] }], votes: [state.data.user.id] }], cores: [], events: [] }), fixture.projectId]);
     assert.equal((await fixture.db.query('select project_id from memberships')).rows[0].project_id, fixture.projectId);
-    assert.equal((await client.request('/profile/role', { body: { role: 'senior' } })).status, 400);
+    assert.equal((await client.request('/profile/role', { body: { role: 'owner' } })).status, 400);
     assert.equal((await client.request('/profile/role', { body: { role: 'it', userId: 'other' } })).status, 400);
+    assert.equal((await client.request('/profile/role', { body: { role: 'supervisor' } })).status, 200);
+    state = await client.request('/state'); assert.equal(state.data.user.role, 'supervisor');
+    assert.equal((await client.request('/profile/role', { body: { role: 'senior' } })).status, 200);
+    state = await client.request('/state'); assert.equal(state.data.user.role, 'senior');
     assert.equal((await client.request('/profile/role', { body: { role: 'it' } })).status, 200);
     state = await client.request('/state'); assert.equal(state.data.user.role, 'it');
     assert.equal(state.data.payload.cards[0].status, 'returned');
@@ -51,6 +61,7 @@ test('employee self-registration proves company mailbox, defaults to designer an
     for (const decision of ['approve', 'return', 'reject']) assert.equal((await client.request('/commands', { body: { command: 'decide', revision: state.data.revision, payload: { id: created.data.id, version: 1, decision, reason: 'Reason' } } })).status, 403);
     assert.equal((await client.request('/profile/role', { body: { role: 'designer' } })).status, 200);
     await client.request('/auth/logout', { body: {} });
+    assert.equal((await client.request('/profile/name', { body: { name: 'Unauthenticated' } })).status, 401);
     assert.equal((await login(client, key, fixture.origin)).status, 200);
 });
 
@@ -73,15 +84,10 @@ test('email codes enforce resend cooldown, expiry, attempt limits and one-time u
     assert.equal((await fixture.db.query('select * from app_users')).rows.length, 0);
 });
 
-test('mail delivery failures do not permit registration; viewer and senior cannot self-escalate', async t => {
+test('mail delivery failures do not permit registration', async t => {
     const fixture = await authFixture(t), client = fixture.client();
     await client.request('/auth/session'); fixture.mailbox.fail = true;
     assert.equal((await client.request('/auth/signup/request', { body: { email: 'employee@abist.co.jp', nickname: 'Employee' } })).status, 503);
     assert.equal((await fixture.db.query('select consumed from auth_email_codes')).rows[0].consumed, true);
     assert.equal((await fixture.db.query('select * from app_users')).rows.length, 0);
-    for (const role of ['viewer', 'senior']) {
-        const account = await fixture.issue(`${role}@abist.co.jp`, 'enroll', role);
-        const user = fixture.client(); await enroll(user, authenticator(), fixture.origin, account.token);
-        assert.equal((await user.request('/profile/role', { body: { role: 'designer' } })).status, 403);
-    }
 });

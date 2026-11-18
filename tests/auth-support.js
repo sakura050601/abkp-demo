@@ -71,7 +71,8 @@ export async function authFixture(t) {
                     auth_remove_passkey: ['p_session_hash', 'p_credential_id'],
                     auth_request_email: ['p_id', 'p_email', 'p_nickname', 'p_session_hash', 'p_code_hash'],
                     auth_verify_email: ['p_id', 'p_session_hash', 'p_code_hash', 'p_grant_hash'],
-                    auth_change_role: ['p_session_hash', 'p_role']
+                    auth_change_role: ['p_session_hash', 'p_role'],
+                    auth_change_name: ['p_session_hash', 'p_name']
                 };
                 const names = signatures[table];
                 if (!names) return send(404, {});
@@ -124,7 +125,7 @@ export async function authFixture(t) {
     const port = await listen(temporary);
     await new Promise(resolve => temporary.close(resolve));
     const origin = `http://localhost:${port}`;
-    const env = { ...process.env, NODE_ENV: 'test', PORT: String(port), DEMO_MODE: 'false', SUPABASE_URL: `http://127.0.0.1:${backendPort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-only', AUTH_ORIGIN: origin, WEBAUTHN_RP_ID: 'localhost' };
+    const env = { ...process.env, NODE_ENV: 'test', PORT: String(port), DEMO_MODE: 'false', SUPABASE_URL: `http://127.0.0.1:${backendPort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-only', AUTH_ORIGIN: origin, WEBAUTHN_RP_ID: 'localhost', DEPLOYMENT_PROVIDER: 'aws' };
     env.AUTH_TEST_MAIL_URL = `http://127.0.0.1:${backendPort}/v3/email/send`;
     env.EMAIL_CODE_SECRET = randomBytes(32).toString('hex');
     let child;

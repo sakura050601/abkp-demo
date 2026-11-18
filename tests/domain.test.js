@@ -7,18 +7,30 @@ function setup() { const s = seed(), c = s.cards[0]; apply(s, u[0], u, 'submit',
 function decide(s, c, actor, extra = {}) { return apply(s, actor, u, 'decide', { id: c.id, version: c.version, decision: 'approve', ...terms, ...extra }); }
 test('two distinct final approvers, with senior, create immutable core', () => { const { s, c } = setup(); decide(s, c, u[0]); decide(s, c, u[0]); decide(s, c, u[1]); assert.equal(s.cores.length, 0); assert.throws(() => decide(s, c, u[1]), /承認済み/); decide(s, c, u[2]); assert.equal(s.cores.length, 1); apply(s, u[0], u, 'revise', { id: c.id, version: 1, text: '工具寸法を追加確認済み' }); assert.equal(c.version, 2); assert.equal(s.cores[0].snapshot.version, 1); assert.equal(c.status, 'draft'); assert.deepEqual(c.votes, []); });
 test('reject same user and missing senior routes', () => { const r = route(); r.at(-1).assignees = ['senior', 'senior']; assert.throws(() => validateRoute(r, u), /異なる2名/); r.at(-1).assignees = ['author', 'reviewer']; assert.throws(() => validateRoute(r, u), /シニア/); });
-test('enforces assignee and readonly access', () => { const { s, c } = setup(); assert.throws(() => decide(s, c, u[1]), /担当者/); assert.throws(() => apply(s, u[3], u, 'create', { text: sampleText, consent: true }), /閲覧者/); });
+test('enforces assignee and supervisor approval without replacing the senior final approver', () => {
+    const { s, c } = setup();
+    assert.throws(() => decide(s, c, u[1]), /担当者/);
+    const supervisor = u.find(user => user.role === 'supervisor');
+    const supervisorRoute = route();
+    supervisorRoute.at(-1).assignees = ['reviewer', supervisor.id];
+    assert.throws(() => validateRoute(supervisorRoute, u), /シニア/);
+    c.route[0].assignees = [supervisor.id];
+    decide(s, c, supervisor);
+    assert.equal(c.step, 1);
+});
 test('return requires reason; revised card restarts route', () => { const { s, c } = setup(); assert.throws(() => decide(s, c, u[0], { decision: 'return' }), /理由/); decide(s, c, u[0], { decision: 'return', reason: '追加資料が必要' }); apply(s, u[0], u, 'revise', { id: c.id, version: 1, text: '確認結果' }); apply(s, u[0], u, 'submit', { id: c.id, version: 2, problem: '影響範囲', route: route() }); assert.equal(c.step, 0); assert.equal(c.version, 2); });
 test('selection criteria must match both final approvers', () => { const { s, c } = setup(); decide(s, c, u[0]); decide(s, c, u[0]); decide(s, c, u[1]); assert.throws(() => decide(s, c, u[2], { priority: 'P3' }), /同じ選定基準/); assert.equal(s.cores.length, 0); });
 test('stale version, missing permission, unknown extraction and hold cannot pass', () => { const s = seed(), c = s.cards[0]; assert.throws(() => apply(s, u[0], u, 'create', { text: sampleText, consent: false }), /許可/); assert.throws(() => apply(s, u[0], u, 'submit', { id: c.id, version: 0, problem: 'a', route: route() }), /版/); assert.throws(() => apply(s, u[0], u, 'submit', { id: c.id, version: 1, problem: 'hold', route: route() }), /未確認/); const id = apply(s, u[0], u, 'create', { text: 'arbitrary input', consent: true }); assert.throws(() => apply(s, u[0], u, 'submit', { id, version: 1, problem: 'invented', route: route() }), /未確認/); });
 test('rejected cards cannot be approved or resubmitted', () => { const { s, c } = setup(); decide(s, c, u[0], { decision: 'reject', reason: '対象外' }); assert.throws(() => decide(s, c, u[0]), /審査中/); assert.throws(() => apply(s, u[0], u, 'submit', { id: c.id, version: 1, problem: 'x', route: route() }), /状態/); });
 
 test('IT can submit material but cannot be assigned or make any approval decision', () => {
-    const actor = { ...u[0], role: 'it' };
-    const users = u.map(user => user.id === actor.id ? actor : user);
+    const actor = u.find(user => user.role === 'it');
+    const users = u;
     const state = seed();
     assert.ok(apply(state, actor, users, 'create', { text: sampleText, consent: true }));
-    assert.throws(() => validateRoute(route(), users), /担当者/);
+    const invalidRoute = route();
+    invalidRoute[0].assignees = [actor.id];
+    assert.throws(() => validateRoute(invalidRoute, users), /担当者/);
     for (const decision of ['approve', 'return', 'reject']) {
         const { s, c } = setup();
         assert.throws(() => apply(s, actor, users, 'decide', { id: c.id, version: 1, decision, reason: 'Reason', ...terms }), error => error.status === 403);

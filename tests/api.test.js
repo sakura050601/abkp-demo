@@ -13,9 +13,10 @@ test('HTTP: auth, permissions, CAS, full approval and logout',async t=>{
  const req=async(path,token,body)=>{const r=await fetch('http://127.0.0.1:3119/api'+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json()};};
  assert.equal((await req('/state')).status,401);
  assert.equal((await req('/login',null,{userId:'author',password:'wrong'})).status,401);
- const tokens={};for(const userId of ['author','reviewer','senior','viewer'])tokens[userId]=(await req('/login',null,{userId,password:'test-password'})).data.token;
+ const tokens={};for(const userId of ['author','reviewer','senior','manager','it'])tokens[userId]=(await req('/login',null,{userId,password:'test-password'})).data.token;
  let state=(await req('/state',tokens.author)).data;assert.equal(state.payload.cards[0].id,(await req('/state',tokens.author)).data.payload.cards[0].id);
- assert.equal((await req('/commands',tokens.viewer,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}})).status,403);
+ assert.equal((await req('/commands',tokens.it,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}})).status,200);
+ state=(await req('/state',tokens.author)).data;
  const created=await req('/commands',tokens.author,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}});assert.equal(created.status,200);
  assert.equal((await req('/commands',tokens.author,{command:'create',revision:state.revision,payload:{text:sampleText,consent:true}})).status,409);
  const id=created.data.id;

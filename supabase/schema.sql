@@ -21,12 +21,13 @@ create table if not exists public.memberships(
  project_id uuid references public.projects(id) on delete cascade,
  user_id uuid references public.app_users(id) on delete cascade,
  display_name text not null,
- role text not null check(role in ('designer','senior','viewer')),
+ role text not null check(role in ('designer','senior','supervisor','it')),
  created_at timestamptz not null default now(),
  primary key(project_id,user_id)
 );
 alter table public.memberships drop constraint if exists memberships_role_check;
-alter table public.memberships add constraint memberships_role_check check(role in ('designer','senior','viewer','it'));
+update public.memberships set role='designer' where role='viewer';
+alter table public.memberships add constraint memberships_role_check check(role in ('designer','senior','supervisor','it'));
 
 -- Preserve old membership IDs without consulting auth.users.
 alter table public.memberships drop constraint if exists memberships_user_id_fkey;
@@ -295,13 +296,13 @@ returns void language plpgsql set search_path = public, pg_temp as $$
 declare browser_session public.auth_sessions; account public.app_users; member public.memberships;
  record public.project_states; card jsonb; cards jsonb := '[]'::jsonb; events jsonb := '[]'::jsonb;
 begin
- if p_role not in ('designer','it') or p_role is null then raise exception 'Role not permitted'; end if;
+ if p_role not in ('designer','senior','supervisor','it') or p_role is null then raise exception 'Role not permitted'; end if;
  select * into browser_session from public.auth_sessions where token_hash=p_session_hash and expires_at>now();
  select * into account from public.app_users where id=browser_session.user_id for update;
  if account.id is null or browser_session.auth_version<>account.auth_version or browser_session.authenticated_at is null
   or browser_session.authenticated_at<now()-interval '5 minutes' then raise exception 'Recent authentication required'; end if;
  select * into member from public.memberships where project_id=browser_session.project_id and user_id=account.id for update;
- if member.user_id is null or member.role not in ('designer','it') then raise exception 'Role not permitted'; end if;
+ if member.user_id is null or member.role not in ('designer','senior','supervisor','it') then raise exception 'Role not permitted'; end if;
  if p_role='it' and member.role<>'it' then
   select * into record from public.project_states where project_id=member.project_id for update;
   for card in select value from jsonb_array_elements(coalesce(record.payload->'cards','[]'::jsonb)) loop
@@ -321,9 +322,27 @@ begin
  insert into public.auth_audit(user_id,action) values(account.id,'role_changed_to_'||p_role);
 end $$;
 
+create or replace function public.auth_change_name(p_session_hash text,p_name text)
+returns void language plpgsql set search_path = public, pg_temp as $$
+declare browser_session public.auth_sessions; account public.app_users; member public.memberships;
+begin
+ if p_name is null or length(trim(p_name)) not between 1 and 60 then raise exception 'Name not permitted'; end if;
+ select * into browser_session from public.auth_sessions where token_hash=p_session_hash and expires_at>now();
+ select * into account from public.app_users where id=browser_session.user_id for update;
+ if account.id is null or browser_session.auth_version<>account.auth_version or browser_session.authenticated_at is null
+  or browser_session.authenticated_at<now()-interval '5 minutes' then raise exception 'Recent authentication required'; end if;
+ select * into member from public.memberships where project_id=browser_session.project_id and user_id=account.id for update;
+ if member.user_id is null then raise exception 'Membership required'; end if;
+ update public.app_users set nickname=trim(p_name) where id=account.id;
+ update public.memberships set display_name=trim(p_name) where user_id=account.id;
+ insert into public.auth_audit(user_id,action) values(account.id,'name_changed');
+end $$;
+
 revoke all on function public.auth_request_email(uuid,text,text,text,text) from public,anon,authenticated;
 revoke all on function public.auth_verify_email(uuid,text,text,text) from public,anon,authenticated;
 revoke all on function public.auth_change_role(text,text) from public,anon,authenticated;
+revoke all on function public.auth_change_name(text,text) from public,anon,authenticated;
 grant execute on function public.auth_request_email(uuid,text,text,text,text) to service_role;
 grant execute on function public.auth_verify_email(uuid,text,text,text) to service_role;
 grant execute on function public.auth_change_role(text,text) to service_role;
+grant execute on function public.auth_change_name(text,text) to service_role;

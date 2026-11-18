@@ -7,7 +7,7 @@ test('Graph pagination cannot send credentials to another host',()=>{
  assert.throws(()=>graphUrl('https://graph.microsoft.com/beta/me'));
  assert.equal(graphUrl('me/joinedTeams'),'https://graph.microsoft.com/v1.0/me/joinedTeams');
 });
-test('Import retains replies and provenance, remains unapproved, and deduplicates',()=>{
+test('Import retains replies and provenance, remains unapproved, deduplicates, and allows supervisors',()=>{
  const r={payload:emptyState()};
  const threads=[{id:'123',body:{content:'<b>design discussion</b>'},replies:[{id:'456',body:{content:'reply'}}]}];
  assert.deepEqual(importThreads(r,demoUsers[0],demoUsers,'t','c',threads),{imported:1,skipped:0});
@@ -16,5 +16,6 @@ test('Import retains replies and provenance, remains unapproved, and deduplicate
  assert.equal(r.payload.cards[0].status,'draft');
  assert.equal(r.payload.cards[0].resolved,false);
  assert.deepEqual(importThreads(r,demoUsers[0],demoUsers,'t','c',threads),{imported:0,skipped:1});
- assert.throws(()=>importThreads({payload:emptyState()},demoUsers[3],demoUsers,'t','c',threads));
+ const supervisorRecord={payload:emptyState()};
+ assert.deepEqual(importThreads(supervisorRecord,demoUsers.find(user=>user.role==='supervisor'),demoUsers,'t','c',threads),{imported:1,skipped:0});
 });

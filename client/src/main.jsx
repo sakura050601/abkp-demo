@@ -1,4 +1,3 @@
-import TeamsImport from './TeamsImport.jsx';
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { startRegistration, startAuthentication, browserSupportsWebAuthn } from '@simplewebauthn/browser';
@@ -19,8 +18,8 @@ let enrollmentToken = new URLSearchParams(location.hash.slice(1)).get('enroll') 
 if (enrollmentToken) history.replaceState(null, '', location.pathname + location.search);
 const sample = '[01] 藤井：接続部の変更で周辺部品との干渉が心配です。\n[02] 田中：関連図面を洗い出して、組付けと工具の操作空間を確認しましょう。\n[03] 佐藤：単一部品の変更でも組付けに影響します。工具の種類と必要寸法は未確認です。';
 const labels = { draft: '草案', review: '確認待ち', returned: '差戻し', rejected: '却下', core: 'コア登録済み' };
-const roles = { designer: '設計者', senior: 'シニア設計者', viewer: '閲覧者', it: 'IT担当者' };
-const isApprover = user => ['designer', 'senior'].includes(user.role);
+const roles = { designer: '初級設計者', senior: '上級設計者', supervisor: '上級管理者', it: 'IT技術者' };
+const isApprover = user => ['designer', 'senior', 'supervisor'].includes(user.role);
 async function request(path, options = {}, recovered = false) {
     const token = sessionStorage.getItem('demo-token');
     const originalUserId = sessionUserId;
@@ -54,7 +53,9 @@ async function session(force = false) {
 async function passkeyLogin() { await session(); const challenge = await request('/auth/login/options', { method: 'POST', body: '{}' }); const response = await startAuthentication({ optionsJSON: challenge.options }); const data = await request('/auth/login/verify', { method: 'POST', body: JSON.stringify({ id: challenge.id, response }) }); csrfToken = data.csrfToken; }
 async function addPasskey(token, name) { await session(); const challenge = await request('/auth/register/options', { method: 'POST', body: JSON.stringify({ ...(token ? { token } : {}), name }) }); const response = await startRegistration({ optionsJSON: challenge.options }); const data = await request('/auth/register/verify', { method: 'POST', body: JSON.stringify({ id: challenge.id, response }) }); csrfToken = data.csrfToken; }
 const Badge = ({ status }) => <span className={'badge ' + status}>{labels[status] || status}</span>;
-function PersonalSettings({ user, logout, busy, refresh }) {
+function PersonalSettings({ user, logout, busy, refresh, run, config }) {
+    const [teams, setTeams] = useState(null);
+    useEffect(() => { run(async () => setTeams(await request('/teams/status'))); }, []);
     return <div className="personal-settings">
         <div className="page-heading"><h1>個人設定</h1></div>
         <section className="panel personal-account" aria-label="アカウント情報">
@@ -62,14 +63,14 @@ function PersonalSettings({ user, logout, busy, refresh }) {
             <div><strong>{user.name}</strong><p>{roles[user.role]}</p></div>
             <button className="secondary" disabled={busy} onClick={logout}><LogOut size={16} />ログアウト</button>
         </section>
-        <h2>プラットフォーム連携</h2>
+        {!config.demo && <div className="profile-edit-grid">
+            <ProfileNameSettings user={user} run={run} busy={busy} refresh={refresh} />
+            <RoleSettings user={user} run={run} busy={busy} refresh={refresh} />
+        </div>}
+        <h2>接続状況</h2>
         <div className="platform-grid">
-            <section className="panel platform-card"><h3>AWS</h3><span className="badge">準備中</span></section>
-            <section className="panel platform-card"><h3>Team Cloud</h3><span className="badge">準備中</span></section>
-            <section className="panel platform-card platform-microsoft">
-                <h3>Azure / Microsoft Entra</h3>
-                <TeamsImport request={request} refresh={refresh} user={user} />
-            </section>
+            <section className="panel platform-card"><h3>AWS</h3><span className="badge">{config.hostingProvider === 'aws' ? 'AWS 上で稼働中' : 'ホスティング情報なし'}</span></section>
+            <section className="panel platform-card"><h3>Teams</h3><span className="badge">{teams?.connected ? `接続済み${teams.account ? `：${teams.account}` : ''}` : teams?.configured ? '未接続' : teams ? '未設定' : '確認中…'}</span></section>
         </div>
     </div>;
 }
@@ -86,17 +87,16 @@ function App() {
     const { payload: s, user, users } = data; const card = s.cards.find(c => c.id === selected); const pending = s.cards.filter(c => c.status === 'review'); const mine = isApprover(user) ? pending.filter(c => c.route[c.step]?.assignees.includes(user.id) && !c.votes.includes(user.id)) : [];
     const nav = [['dashboard', LayoutDashboard, 'ホーム'], ['new', Plus, '新規登録'], ['reviews', Inbox, '承認タスク', mine.length], ['cards', Layers, '知識カード'], ['core', Database, 'コアナレッジ'], ['raw', FileText, '原資料ライブラリ'], ['history', History, '操作履歴'], ['settings', ShieldCheck, '管理・セキュリティ']];
     const title = page === 'profile' ? '個人設定' : nav.find(n => n[0] === page)?.[2] || 'ホーム';
-    return <div className="shell"><aside className={menu ? 'sidebar open' : 'sidebar'}><a className="brand" onClick={() => navigate('dashboard')}><span className="brand-icon"><Layers /></span><span>設計ナレッジ</span></a><div className="workspace-tag"><span className="org">設</span><div>設計事業部<small>共有ワークスペース</small></div><ChevronRight size={16} /></div><nav>{nav.map(([id, Icon, label, count]) => <button key={id} className={page === id ? 'active' : ''} onClick={() => navigate(id)} disabled={id === 'new' && user.role === 'viewer'}><Icon size={19} /><span>{label}</span>{!!count && <b>{count}</b>}</button>)}</nav><div className="sidebar-bottom"><button className="profile" onClick={() => navigate('profile')}><span className="avatar">{user.name[0]}</span><span>{user.name}<small>{roles[user.role]} · 個人設定</small></span><ChevronRight size={16} /></button></div></aside>{menu && <div className="scrim" onClick={() => setMenu(false)} />}
+    return <div className="shell"><aside className={menu ? 'sidebar open' : 'sidebar'}><a className="brand" onClick={() => navigate('dashboard')}><span className="brand-icon"><Layers /></span><span>設計ナレッジ</span></a><div className="workspace-tag"><span className="org">設</span><div>設計事業部<small>共有ワークスペース</small></div><ChevronRight size={16} /></div><nav>{nav.map(([id, Icon, label, count]) => <button key={id} className={page === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{!!count && <b>{count}</b>}</button>)}</nav><div className="sidebar-bottom"><button className="profile" onClick={() => navigate('profile')}><span className="avatar">{user.name[0]}</span><span>{user.name}<small>{roles[user.role]} · 個人設定</small></span><ChevronRight size={16} /></button></div></aside>{menu && <div className="scrim" onClick={() => setMenu(false)} />}
         <main><header><div className="crumb"><button className="mobile-menu icon-button" onClick={() => setMenu(!menu)} aria-label="メニュー"><Menu /></button><span>設計事業部</span><ChevronRight size={14} /><strong>{title}</strong></div><div className="header-right"><span className="mode-dot" />{config.demo ? 'DEMO' : '接続済み'}<button className="icon-button" onClick={() => run(refresh)} aria-label="再読み込み"><RefreshCw size={16} /></button><button type="button" className="avatar small profile-avatar" aria-label="個人設定を開く" onClick={() => navigate('profile')}>{user.name[0]}</button></div></header><div className="content">{error && <div role="alert" className="alert"><AlertCircle size={18} />{error}<button onClick={() => setError('')} aria-label="閉じる"><X size={16} /></button></div>}{notice && <div role="status" className="toast"><Check size={16} />{notice}</div>}
             {card ? <Detail c={card} s={s} users={users} user={user} command={command} busy={busy} back={() => setSelected(null)} /> :
-                page === 'profile' ? <PersonalSettings user={user} logout={logout} busy={busy} refresh={refresh} /> : page === 'new' ? <Create users={users} user={user} s={s} command={command} busy={busy} open={id => { setSelected(id); setPage('cards'); }} /> :
+                page === 'profile' ? <PersonalSettings user={user} logout={logout} busy={busy} refresh={refresh} run={run} config={config} /> : page === 'new' ? <Create users={users} user={user} s={s} command={command} busy={busy} open={id => { setSelected(id); setPage('cards'); }} /> :
                     page === 'dashboard' ? <Workbench s={s} user={user} users={users} mine={mine} pending={pending} open={setSelected} navigate={navigate} /> :
                         ['cards', 'reviews', 'core'].includes(page) ? <><div className="page-heading"><div><h1>{title}</h1></div></div><label className="search"><Search size={18} /><input placeholder="タイトル・条件・IDで検索" value={query} onChange={e => setQuery(e.target.value)} /></label>{page === 'core' ? <div className="core-grid">{s.cores.filter(c => JSON.stringify(c.snapshot).includes(query)).map(c => <article className="panel core-card" key={c.id}><span className="badge core">承認済み · v{c.approvedVersion}</span><h2>{c.snapshot.title}</h2><p>{c.snapshot.action}</p><div className="tags"><span>{c.snapshot.category}</span><span>{c.snapshot.importance}</span><span>{c.snapshot.priority}</span></div><small>{c.id} · {new Date(c.approvedAt).toLocaleDateString('ja-JP')}</small><details><summary>承認済みの版と根拠</summary><p>{c.snapshot.conditions}</p><p>{c.snapshot.rationale}</p><p>原資料: {c.snapshot.rawId} (v{c.snapshot.rawRevision}) / {c.snapshot.evidence}</p><p>承認者: {c.approvers.map(id => users.find(u => u.id === id)?.name || id).join('・')}</p></details><button className="text-button" onClick={() => setSelected(c.cardId)}>現在のカードを見る <ArrowRight size={15} /></button></article>)}{!s.cores.length && <Empty text="承認済みの知識はありません" />}</div> : <section className="panel"><CardList cards={(page === 'reviews' ? pending : s.cards).filter(c => [c.title, c.conditions, c.id, c.problem].join(' ').includes(query))} open={setSelected} users={users} /></section>}</> :
                             page === 'raw' ? <><div className="page-heading"><div><h1>原資料ライブラリ</h1></div></div>{s.raw.map(r => <section className="panel raw-panel" key={r.id}><div className="section-title"><h2><FileText size={18} /> {r.id}</h2><span className="badge">版 {r.revision} · 案件内</span></div><pre>{r.text || '添付資料を参照'}</pre><Attachments files={r.files} /><button className="text-button" onClick={() => setSelected(s.cards.find(c => c.rawId === r.id)?.id)}>関連するカード <ArrowRight size={15} /></button></section>)}</> :
                                 page === 'history' ? <><div className="page-heading"><div><h1>操作履歴</h1></div></div><section className="panel">{s.events.map(e => <div className="event" key={e.id}><span className="event-dot" /><div><b>{e.action}</b><p>{e.actor} · {e.target} {e.detail && ' / ' + e.detail}</p></div><time>{new Date(e.time).toLocaleString('ja-JP')}</time></div>)}</section></> :
-                                    <><div className="page-heading"><div><h1>管理・セキュリティ</h1></div></div><div className="settings-grid"><section className="panel"><h2><Database size={21} /> データ接続</h2><dl><dt>保存先</dt><dd>{config.demo ? 'ローカル JSON（演示用）' : 'Supabase PostgreSQL'}</dd><dt>認証</dt><dd>{config.demo ? 'デモアカウント / 8時間セッション' : 'パスキー / メール確認 / 8時間セッション'}</dd><dt>抽出</dt><dd>シミュレーション（モデル未接続）</dd><dt>共有範囲</dt><dd>プロジェクトのメンバーのみ</dd></dl><p className="muted">接続・メンバー変更：Supabase管理画面</p></section><section className="panel"><h2><ShieldCheck size={21} /> 承認ルール</h2><ul className="rule-list"><li>最終入庫は異なる2名の一致</li><li>シニア設計者を最低1名含む</li><li>重要度・優先度・主／副の一致</li><li>改訂時は新しい版を再承認</li><li>閲覧者は書き込み不可</li></ul></section></div><section className="panel team"><h2>メンバー</h2>{users.map(u => <div className="member" key={u.id}><span className="avatar">{u.name[0]}</span><b>{u.name}</b><span className="badge">{roles[u.role]}</span></div>)}</section></>}
+                                    <><div className="page-heading"><div><h1>管理・セキュリティ</h1></div></div><div className="settings-grid"><section className="panel"><h2><Database size={21} /> データ接続</h2><dl><dt>保存先</dt><dd>{config.demo ? 'ローカル JSON（演示用）' : 'Supabase PostgreSQL'}</dd><dt>認証</dt><dd>{config.demo ? 'デモアカウント / 8時間セッション' : 'パスキー / メール確認 / 8時間セッション'}</dd><dt>抽出</dt><dd>シミュレーション（モデル未接続）</dd><dt>共有範囲</dt><dd>プロジェクトのメンバーのみ</dd></dl><p className="muted">接続・メンバー変更：Supabase管理画面</p></section><section className="panel"><h2><ShieldCheck size={21} /> 承認ルール</h2><ul className="rule-list"><li>最終入庫は異なる2名の一致</li><li>上級設計者を最低1名含む</li><li>重要度・優先度・主／副の一致</li><li>改訂時は新しい版を再承認</li><li>IT技術者は承認・差戻し・却下不可</li></ul></section></div><section className="panel team"><h2>メンバー</h2>{users.map(u => <div className="member" key={u.id}><span className="avatar">{u.name[0]}</span><b>{u.name}</b><span className="badge">{roles[u.role]}</span></div>)}</section></>}
             {page === 'settings' && !card && !config.demo && <PasskeySettings run={run} busy={busy} />}
-            {page === 'settings' && !card && !config.demo && <RoleSettings user={user} run={run} busy={busy} refresh={refresh} />}
         </div></main></div>;
 }
 
@@ -105,7 +105,7 @@ function Workbench({ s, user, users, mine, pending, open, navigate }) {
     const drafts = s.cards.filter(c => c.owner === user.id && ['draft', 'returned'].includes(c.status));
     const tabs = [['todo', '自分のタスク', mine], ['draft', '草案・差戻し', drafts], ['all', 'すべて', s.cards]];
     const rows = tabs.find(t => t[0] === tab)[2].filter(c => [c.title, c.id, c.problem].join(' ').includes(q));
-    return <><div className="page-heading work-heading"><h1>ホーム</h1><button className="primary" disabled={user.role === 'viewer'} onClick={() => navigate('new')}><Plus size={17} />新規登録</button></div>
+    return <><div className="page-heading work-heading"><h1>ホーム</h1><button className="primary" onClick={() => navigate('new')}><Plus size={17} />新規登録</button></div>
         <div className="metrics-strip">{[['自分のタスク', mine.length, 'todo'], ['確認待ち', pending.length, 'reviews'], ['知識カード', s.cards.length, 'cards'], ['コア知識', s.cores.length, 'core']].map(([label, n, target]) => <button key={label} onClick={() => target === 'todo' ? setTab('todo') : navigate(target)}><span>{label}</span><strong>{n}</strong></button>)}</div>
         <section className="panel work-list"><div className="work-toolbar"><div className="list-tabs" role="tablist" aria-label="表示対象">{tabs.map(([id, label, items]) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} onClick={() => setTab(id)}>{label}<span>{items.length}</span></button>)}</div><label className="search compact-search"><Search size={16} /><input aria-label="カードを検索" placeholder="検索" value={q} onChange={e => setQ(e.target.value)} /></label></div>
             <div className="work-columns"><span>タイトル</span><span>ステータス</span><span>担当者</span><span /></div>
@@ -145,16 +145,23 @@ function EmployeeLogin({ error, busy, login, run }) {
         <button className="text-button" disabled={busy} onClick={() => { setToken(''); setVerification(null); setCode(''); setStage(stage === 'login' ? 'email' : 'login'); }}>{stage === 'login' ? '会社メールで新規登録' : 'ログインに戻る'}</button>
     </section></div>;
 }
+function ProfileNameSettings({ user, run, busy, refresh }) {
+    const [name, setName] = useState(user.name);
+    useEffect(() => setName(user.name), [user.name]);
+    return <section className="panel"><h2>表示名</h2><form className="passkey-add" onSubmit={event => { event.preventDefault(); run(async () => { await passkeyLogin(); await request('/profile/name', { method: 'POST', body: JSON.stringify({ name }) }); await refresh(); }); }}>
+        <label>表示名<input required maxLength={60} value={name} onChange={event => setName(event.target.value)} /></label>
+        <button className="primary" disabled={busy || name.trim() === user.name}><Check size={16} />表示名を保存</button>
+    </form></section>;
+}
 function RoleSettings({ user, run, busy, refresh }) {
     const [role, setRole] = useState(user.role);
     useEffect(() => setRole(user.role), [user.role]);
-    if (!['designer', 'it'].includes(user.role)) return null;
-    return <section className="panel"><h2>自分の役割</h2><form className="passkey-add" onSubmit={event => { event.preventDefault(); run(async () => { await passkeyLogin(); await request('/profile/role', { method: 'POST', body: JSON.stringify({ role }) }); await refresh(); }); }}><label>役割<select aria-label="役割" value={role} onChange={event => setRole(event.target.value)}><option value="designer">設計者</option><option value="it">IT担当者（承認不可）</option></select></label><button className="primary" disabled={busy || role === user.role}><ShieldCheck size={16} />本人確認して変更</button></form></section>;
+    return <section className="panel"><h2>自分の役割</h2><form className="passkey-add" onSubmit={event => { event.preventDefault(); run(async () => { await passkeyLogin(); await request('/profile/role', { method: 'POST', body: JSON.stringify({ role }) }); await refresh(); }); }}><label>役割<select aria-label="役割" value={role} onChange={event => setRole(event.target.value)}><option value="designer">初級設計者</option><option value="senior">上級設計者</option><option value="supervisor">上級管理者</option><option value="it">IT技術者（承認不可）</option></select></label><button className="primary" disabled={busy || role === user.role}><ShieldCheck size={16} />本人確認して変更</button></form></section>;
 }
 function Login({ config, error, busy, login }) {
     const [id, setId] = useState('author'), [password, setPassword] = useState('knowledge-demo'), [token, setToken] = useState(enrollmentToken), [enrolling, setEnrolling] = useState(!!enrollmentToken), [name, setName] = useState('メインキー');
     const supported = config.demo || (window.isSecureContext && browserSupportsWebAuthn());
-    return <div className="login"><section className="login-form"><span className="badge">{config.demo ? 'DEMO' : enrolling ? '招待・アカウント復旧' : 'ログイン'}</span><div className="login-brand"><Layers size={25} /><h2>設計ナレッジ</h2></div><form onSubmit={event => { event.preventDefault(); login(config.demo ? { userId: id, password } : enrolling ? { token, name } : {}); }}>{config.demo ? <><label>デモアカウント<select value={id} onChange={event => setId(event.target.value)}><option value="author">藤井 美咲 · 投稿者</option><option value="reviewer">田中 健一 · 設計者</option><option value="senior">佐藤 直樹 · シニア設計者</option><option value="viewer">山本 葵 · 閲覧者</option></select></label><label>パスワード<input type="password" required value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label></> : enrolling && <><label>招待・復旧コード<input type="password" required autoComplete="off" value={token} pattern="[A-Za-z0-9_-]{43}" onChange={event => setToken(event.target.value.trim())} /></label><label>キーの名前<input required maxLength={60} value={name} onChange={event => setName(event.target.value)} /></label></>}{!supported && <p role="alert" className="alert">このブラウザーではパスキーを利用できません。HTTPS対応のブラウザーで開いてください。</p>}{error && <div className="alert" role="alert">{error}</div>}<button className="primary" disabled={busy || !supported}><Lock size={18} />{busy ? '本人確認中…' : config.demo ? 'ログイン' : enrolling ? 'パスキーを登録' : 'パスキーでログイン'}</button></form>{!config.demo && <button type="button" className="text-button" disabled={busy} onClick={() => setEnrolling(!enrolling)}>{enrolling ? 'ログインに戻る' : '招待・復旧コードを入力'}</button>}</section></div>;
+    return <div className="login"><section className="login-form"><span className="badge">{config.demo ? 'DEMO' : enrolling ? '招待・アカウント復旧' : 'ログイン'}</span><div className="login-brand"><Layers size={25} /><h2>設計ナレッジ</h2></div><form onSubmit={event => { event.preventDefault(); login(config.demo ? { userId: id, password } : enrolling ? { token, name } : {}); }}>{config.demo ? <><label>デモアカウント<select value={id} onChange={event => setId(event.target.value)}><option value="author">藤井 美咲 · 投稿者</option><option value="reviewer">田中 健一 · 初級設計者</option><option value="senior">佐藤 直樹 · 上級設計者</option><option value="manager">山本 葵 · 上級管理者</option><option value="it">伊藤 遥 · IT技術者</option></select></label><label>パスワード<input type="password" required value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label></> : enrolling && <><label>招待・復旧コード<input type="password" required autoComplete="off" value={token} pattern="[A-Za-z0-9_-]{43}" onChange={event => setToken(event.target.value.trim())} /></label><label>キーの名前<input required maxLength={60} value={name} onChange={event => setName(event.target.value)} /></label></>}{!supported && <p role="alert" className="alert">このブラウザーではパスキーを利用できません。HTTPS対応のブラウザーで開いてください。</p>}{error && <div className="alert" role="alert">{error}</div>}<button className="primary" disabled={busy || !supported}><Lock size={18} />{busy ? '本人確認中…' : config.demo ? 'ログイン' : enrolling ? 'パスキーを登録' : 'パスキーでログイン'}</button></form>{!config.demo && <button type="button" className="text-button" disabled={busy} onClick={() => setEnrolling(!enrolling)}>{enrolling ? 'ログインに戻る' : '招待・復旧コードを入力'}</button>}</section></div>;
 }
 function PasskeySettings({ run, busy }) {
     const [keys, setKeys] = useState(null), [name, setName] = useState('予備キー'), [message, setMessage] = useState('');

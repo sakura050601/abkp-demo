@@ -19,7 +19,7 @@ app.set('trust proxy', 1);
 app.use(helmet({ referrerPolicy: { policy: 'no-referrer' } })); app.use(cors({ origin: demo ? (process.env.CLIENT_ORIGIN || 'http://127.0.0.1:5173').split(',').map(s => s.trim()) : process.env.AUTH_ORIGIN, credentials: true }));
 app.use('/api/auth', express.json({ limit: '32kb' })); app.use(express.json({ limit: '8mb' })); app.use('/api', rateLimit({ windowMs: 60000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false }));
 app.get('/api/health', (_, res) => res.json({ ok: true, mode: demo ? 'demo' : 'supabase' }));
-app.get('/api/config', (_, res) => res.json({ demo, authMode: demo ? 'demo' : 'passkey' }));
+app.get('/api/config', (_, res) => res.json({ demo, authMode: demo ? 'demo' : 'passkey', hostingProvider: process.env.DEPLOYMENT_PROVIDER || 'other' }));
 if (!demo) installAuth(app, db);
 function createSession(session) {
     const token = randomBytes(32).toString('hex');
@@ -69,12 +69,21 @@ app.get('/api/state', async (req, res, next) => { try { const record = await rea
 app.post('/api/profile/role', async (req, res, next) => {
     try {
         if (demo) return res.status(404).json({ error: 'パスキー接続時のみ変更できます。' });
-        const { role } = z.object({ role: z.enum(['designer', 'it']) }).strict().parse(req.body);
+        const { role } = z.object({ role: z.enum(['designer', 'senior', 'supervisor', 'it']) }).strict().parse(req.body);
         const work = queue.then(async () => {
             const { error } = await db.rpc('auth_change_role', { p_session_hash: req.authSession.token_hash, p_role: role });
             if (error) throw Object.assign(new Error('本人確認をやり直してから役割を変更してください。'), { status: 403 });
         });
         queue = work.catch(() => { }); await work;
+        res.json({ ok: true });
+    } catch (error) { next(error); }
+});
+app.post('/api/profile/name', async (req, res, next) => {
+    try {
+        if (demo) return res.status(404).json({ error: 'パスキー接続時のみ変更できます。' });
+        const { name } = z.object({ name: z.string().trim().min(1).max(60) }).strict().parse(req.body);
+        const { error } = await db.rpc('auth_change_name', { p_session_hash: req.authSession.token_hash, p_name: name });
+        if (error) throw Object.assign(new Error('本人確認をやり直してから表示名を変更してください。'), { status: 403 });
         res.json({ ok: true });
     } catch (error) { next(error); }
 });

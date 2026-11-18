@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-export const demoUsers = [{ id: 'author', name: '藤井 美咲', role: 'designer' }, { id: 'reviewer', name: '田中 健一', role: 'designer' }, { id: 'senior', name: '佐藤 直樹', role: 'senior' }, { id: 'viewer', name: '山本 葵', role: 'viewer' }];
+export const demoUsers = [{ id: 'author', name: '藤井 美咲', role: 'designer' }, { id: 'reviewer', name: '田中 健一', role: 'designer' }, { id: 'senior', name: '佐藤 直樹', role: 'senior' }, { id: 'manager', name: '山本 葵', role: 'supervisor' }, { id: 'it', name: '伊藤 遥', role: 'it' }];
 export const sampleText = '[01] 藤井：接続部の変更で周辺部品との干渉が心配です。\n[02] 田中：関連図面を洗い出して、組付けと工具の操作空間を確認しましょう。\n[03] 佐藤：単一部品の変更でも組付けに影響します。工具の種類と必要寸法は未確認です。';
 export const emptyState = () => ({ raw: [], cards: [], cores: [], events: [] });
-export const canApprove = role => ['designer', 'senior'].includes(role);
+export const canApprove = role => ['designer', 'senior', 'supervisor'].includes(role);
 const fail = (msg, status = 400) => { throw Object.assign(new Error(msg), { status }); };
 const event = (s, actor, action, id, detail = '') => s.events.unshift({ id: randomUUID(), actor: actor.name, action, target: id, detail, time: new Date().toISOString() });
 const person = (users, id) => users.find(u => u.id === id);
@@ -19,7 +19,6 @@ export function validateRoute(route, users) {
     if (route.slice(0, -1).some(r => r.type !== 'review' || r.assignees.length !== 1)) fail('前工程は1名の確認者を指定してください。');
 }
 export function apply(s, actor, users, command, p) {
-    if (actor.role === 'viewer') fail('閲覧者は変更できません。', 403);
     if (command === 'create') {
         if (!p.consent) fail('保存・利用許可の確認が必要です。');
         if (!p.text?.trim() && !p.files?.length) fail('資料を追加してください。');
@@ -49,7 +48,7 @@ export function apply(s, actor, users, command, p) {
         c.limits = p.text; c.rawRevision = r.revision; event(s, actor, '資料追加・新しい版', c.id, 'v' + c.version); return c.id;
     }
     if (command !== 'decide') fail('操作が無効です。');
-    if (!canApprove(actor.role)) fail('IT担当者は承認・差戻し・却下できません。', 403);
+    if (!canApprove(actor.role)) fail('IT技術者は承認・差戻し・却下できません。', 403);
     if (c.status !== 'review') fail('審査中のカードではありません。');
     const step = c.route[c.step]; if (!step.assignees.includes(actor.id)) fail('この工程の担当者ではありません。', 403);
     if (c.votes.includes(actor.id)) fail('この版には既に承認済みです。', 409);

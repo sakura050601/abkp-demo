@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { authFixture, authenticator, enroll, login } from './auth-support.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
 
 test('operator CLI initializes safely, verifies identity and issues single-use enrollment/recovery grants', async t => {
     const fixture = await authFixture(t);
@@ -26,14 +27,26 @@ test('operator CLI initializes safely, verifies identity and issues single-use e
     const client = fixture.client();
     assert.equal((await enroll(client, authenticator(), fixture.origin, token)).status, 200);
     const state = await client.request('/state');
-    assert.equal(state.data.user.role, 'viewer');
-    assert.equal((await client.request('/commands', { body: { command: 'create', revision: 0, payload: { text: 'Example', consent: true } } })).status, 403);
+    assert.equal(state.data.user.role, 'designer');
+    assert.equal((await client.request('/commands', { body: { command: 'create', revision: 0, payload: { text: 'Example', consent: true } } })).status, 200);
     await assert.rejects(command(args));
     await command([...args, '--recover']);
     assert.equal((await client.request('/state')).status, 401);
     const { rows: [privileges] } = await fixture.db.query("select has_table_privilege('anon','auth_passkeys','SELECT') as can_read, has_function_privilege('authenticated','auth_complete(jsonb,jsonb,text,text)','EXECUTE') as can_finish");
     assert.equal(privileges.can_read, false);
     assert.equal(privileges.can_finish, false);
+});
+
+test('schema migrates legacy viewer memberships to junior designers and accepts supervisor roles', async t => {
+    const fixture = await authFixture(t);
+    const account = await fixture.issue();
+    const client = fixture.client();
+    assert.equal((await enroll(client, authenticator(), fixture.origin, account.token)).status, 200);
+    await fixture.db.exec("alter table memberships drop constraint memberships_role_check; alter table memberships add constraint memberships_role_check check(role in ('designer','senior','viewer','it'));");
+    await fixture.db.query("update memberships set role='viewer' where user_id=$1", [account.userId]);
+    await fixture.db.exec(await readFile(new URL('../supabase/schema.sql', import.meta.url), 'utf8'));
+    assert.equal((await fixture.db.query('select role from memberships where user_id=$1', [account.userId])).rows[0].role, 'designer');
+    await fixture.db.query("update memberships set role='supervisor' where user_id=$1", [account.userId]);
 });
 
 test('production: invitation-only enrollment, cookie rotation, CSRF, persistence and project permissions', async t => {
@@ -126,7 +139,7 @@ test('grants expire, concurrent enrollment is single-use, and failed enrollment 
     assert.equal((await enroll(client, key, fixture.origin, removed.token)).status, 409);
     assert.equal((await fixture.db.query('select * from auth_passkeys where user_id=$1', [removed.userId])).rows.length, 0);
     assert.equal((await fixture.db.query('select * from auth_grants where user_id=$1', [removed.userId])).rows.length, 1);
-    await fixture.db.query("insert into memberships(project_id,user_id,display_name,role) values($1,$2,'Restored','viewer')", [fixture.projectId, removed.userId]);
+    await fixture.db.query("insert into memberships(project_id,user_id,display_name,role) values($1,$2,'Restored','designer')", [fixture.projectId, removed.userId]);
     assert.equal((await enroll(client, key, fixture.origin, removed.token)).status, 200);
 });
 
